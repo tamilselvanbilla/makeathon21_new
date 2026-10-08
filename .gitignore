@@ -11,6 +11,7 @@ __pycache__/
 # Local runtime data and generated files
 .cache/
 Qwen/
+models/llm/*.gguf
 audio/*.wav
 *.log
 
