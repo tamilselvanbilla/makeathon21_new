@@ -7,11 +7,11 @@ This project provides a local voice assistant with:
 
 - Faster-Whisper for speech-to-text.
 - SoundDevice for microphone recording.
-- Ollama for the language model and answer generation.
+- Local llama-cpp execution of the Qwen3 0.6B GGUF model.
 - Optional pyttsx3 speech output.
 
-The recommended setup uses the Ollama model llama3.2. The older standalone
-Qwen GGUF path in src/llm.py is optional and is not used by src/main.py.
+The main application uses models/llm/Qwen3-0.6B-Q4_K_M.gguf directly.
+It does not require an Ollama server or the llama3.2 model.
 
 GitHub and Raspberry Pi portability
 -----------------------------------
@@ -37,46 +37,18 @@ Windows development machine:
 - PowerShell 5.1 or PowerShell 7.
 - Internet access for installing Python packages.
 - A microphone.
-- Ollama installed and running.
+- The local Qwen GGUF model present under models/llm/.
 
 Raspberry Pi 4B:
 - Raspberry Pi OS with a recent 64-bit Python 3.11/3.12 installation.
 - Python virtual environment support.
 - PortAudio microphone input support.
-- Ollama installed and running.
 - Approximately 4-8 GB free RAM for the Hugging Face Whisper tiny model,
-  plus the model cache required by Ollama.
+  plus enough RAM to load the Qwen3 0.6B GGUF model.
 
-Recommended installation: Ollama + llama3.2
---------------------------------------------
-1. Install Ollama on the target computer using the official installer for that
-   operating system. On Linux/Raspberry Pi OS, the standard installer is:
-
-     curl -fsSL https://ollama.com/install.sh | sh
-
-   On Windows, install the Ollama package through the official installer or
-   package manager, then restart PowerShell.
-
-2. Verify that Ollama is available:
-
-     ollama --version
-
-3. Start the Ollama service if it is not already running:
-
-     ollama serve
-
-   Keep this command running in a separate terminal. If you used the
-   installation script, the service may already be running.
-
-4. Download the model:
-
-     ollama pull llama3.2
-
-5. Confirm that the model is available:
-
-     ollama list
-
-6. Create and activate a Python virtual environment in the project root:
+Recommended installation: local Qwen GGUF
+------------------------------------------
+1. Create and activate a Python virtual environment in the project root:
 
      py -3.11 -m venv .venv
      .\.venv\Scripts\python.exe -m pip install --upgrade pip
@@ -89,13 +61,13 @@ Recommended installation: Ollama + llama3.2
      python -m pip install --upgrade pip
      python -m pip install -r requirements.txt
 
-7. On Linux/Raspberry Pi, install any operating-system audio dependencies
-   required by SoundDevice and PortAudio, for example:
+2. Install any operating-system audio dependencies required by SoundDevice and
+   PortAudio, for example:
 
      sudo apt update
      sudo apt install -y portaudio19-dev python3-dev
 
-8. Configure the microphone if needed. For a selected device index:
+3. Configure the microphone if needed. For a selected device index:
 
      $env:MIC_DEVICE = "0"
      python src\main.py
@@ -113,7 +85,7 @@ The application will:
 - list available microphones;
 - ask for a microphone index when MIC_DEVICE is not configured;
 - transcribe speech with Whisper using English as the default;
-- call Ollama's llama3.2 model;
+- load models/llm/Qwen3-0.6B-Q4_K_M.gguf through llama-cpp;
 - optionally speak the response with pyttsx3.
 
 Use Ctrl+C to stop the application. Say "quit" or "exit" to stop the
@@ -133,28 +105,16 @@ The first Whisper run may download the tiny language model. The project
 uses English by default, including Indian English accent handling through
 faster-whisper's English language mode.
 
-Optional standalone Qwen GGUF mode
------------------------------------
-This mode is not required for the recommended Ollama setup. It uses
-src/llm.py and the Python llama-cpp package.
-
-1. Install the optional package separately:
-
-     python -m pip install llama-cpp-python
-
-2. Place a compatible model file at:
-
-     models\llm\Qwen3-0.6B-Q4_K_M.gguf
-
-   The model file is intentionally ignored by Git because it is large and may
-   be downloaded or generated on the target device.
-
-3. Run the standalone model:
+Standalone Qwen GGUF mode
+--------------------------
+The main application already uses the Qwen model through llama-cpp. The
+standalone src/llm.py entry point can also run the same model:
 
      python src\llm.py
 
-The included Qwen/ folder and .cache/ folder are not used by the current
-application and should be removed or ignored after model conversion.
+The model file is intentionally ignored by Git because it is large and is
+stored locally on the target device. The included Qwen/ folder and .cache/
+folder are not used by the current application.
 
 GitHub preparation
 ------------------
@@ -170,9 +130,8 @@ virtual environments, or the full llama.cpp source tree.
 Raspberry Pi deployment checklist
 ---------------------------------
 - [ ] Install Python 3.11 or newer.
-- [ ] Install Ollama and run ollama serve.
-- [ ] Run ollama pull llama3.2.
-- [ ] Install dependencies from requirements.txt.
+- [ ] Install dependencies from requirements.txt, including llama-cpp-python.
+- [ ] Confirm models/llm/Qwen3-0.6B-Q4_K_M.gguf exists.
 - [ ] Install PortAudio and required audio system libraries.
 - [ ] Set MIC_DEVICE when the microphone index is known.
 - [ ] Verify the microphone with src/mic_test.py.
@@ -183,9 +142,9 @@ Raspberry Pi deployment checklist
 
 Notes on non-required components
 -------------------------------
-- The full tools/llama.cpp source tree is not required for the main Ollama
-  application and should not be committed to GitHub.
-- llama-cpp-python is only required for the optional standalone Qwen path.
+- The full tools/llama.cpp source tree is not required for the main application
+  and should not be committed to GitHub.
+- llama-cpp-python is required for the local Qwen GGUF path.
 - The Qwen/ folder and downloaded model caches are local runtime data,
   not application source.
 - The audio/test.wav recording is a generated test artifact and is ignored.

@@ -1,13 +1,11 @@
-# Recommended runtime: Faster-Whisper + microphone input + Ollama
-# Ollama itself is installed separately and must be running locally.
+# Recommended runtime: Faster-Whisper + microphone input + local Qwen GGUF
 faster-whisper==1.2.1
 av<19
 numpy
 scipy
 sounddevice
 pyttsx3
+llama-cpp-python
 
-# Not included by default:
-#   llama-cpp-python  - only required by optional src/llm.py standalone Qwen mode
-#   tools/llama.cpp  - large source tree; not required by the recommended Ollama mode
-#   local GGUF files - downloaded or generated on the target device, never committed
+# The local Qwen model is stored under models/llm/ and is not committed.
+# tools/llama.cpp is not required by the main voice assistant.

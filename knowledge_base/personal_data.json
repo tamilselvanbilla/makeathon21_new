@@ -1,0 +1,276 @@
+{
+  "financial": [
+    {
+      "owner": "John",
+      "record_type": "income",
+      "source": "Test sample",
+      "monthly_income": 85000,
+      "annual_income": 1020000,
+      "income_type": "Salary",
+      "employer": "Infosys Ltd.",
+      "details": "Monthly gross salary is INR 85,000; net salary is INR 62,000 after standard deductions."
+    },
+    {
+      "owner": "John",
+      "record_type": "expense",
+      "source": "Test sample",
+      "monthly_expenses": {
+        "housing": 18000,
+        "food": 11000,
+        "transport": 7000,
+        "utilities": 6000,
+        "entertainment": 4000
+      },
+      "monthly_total": 46000,
+      "currency": "INR"
+    },
+    {
+      "owner": "John",
+      "record_type": "mutual_fund",
+      "source": "Test sample",
+      "scheme": "Balanced Advantage Fund",
+      "investment_amount": 25000,
+      "current_value": 27300,
+      "asset_type": "Mutual Fund"
+    },
+    {
+      "owner": "John",
+      "record_type": "stock",
+      "source": "Test sample",
+      "company": "Infosys Ltd.",
+      "quantity": 10,
+      "purchase_price": 1750,
+      "current_price": 1880,
+      "current_value": 18800
+    },
+    {
+      "owner": "John",
+      "record_type": "bond",
+      "source": "Test sample",
+      "issuer": "State Bank of India",
+      "face_value": 50000,
+      "coupon_rate": 6.5,
+      "maturity_date": "2028-12-31"
+    },
+    {
+      "owner": "John",
+      "record_type": "bank_loan",
+      "source": "Test sample",
+      "bank": "HDFC Bank",
+      "loan_type": "Home Loan",
+      "principal": 1200000,
+      "annual_interest_rate": 7.5,
+      "monthly_installment": 9200,
+      "remaining_tenure_months": 84
+    },
+    {
+      "owner": "John's wife",
+      "record_type": "income",
+      "source": "Test sample",
+      "monthly_income": 62000,
+      "annual_income": 744000,
+      "income_type": "Salary",
+      "employer": "Tata Consultancy Services"
+    }
+  ],
+  "medical": [
+    {
+      "owner": "John",
+      "record_type": "medical_report",
+      "source": "Test sample",
+      "report_date": "2026-03-14",
+      "report_name": "Complete Blood Count and Metabolic Profile",
+      "summary": "CBC, lipid profile, liver function, and thyroid tests were recorded in the synthetic test report."
+    },
+    {
+      "owner": "John",
+      "record_type": "prescription",
+      "source": "Test sample",
+      "prescription_date": "2026-04-02",
+      "prescription_number": "TEST-PRESCRIPTION-001",
+      "medication": "Sample medication for monitoring",
+      "dosage": "As advised by a clinician"
+    },
+    {
+      "owner": "John",
+      "record_type": "vitals",
+      "source": "Test sample",
+      "record_date": "2026-04-10",
+      "height_cm": 175,
+      "weight_kg": 78,
+      "blood_pressure": "120/80 mmHg",
+      "pulse_per_minute": 72,
+      "oxygen_saturation_percent": 98
+    },
+    {
+      "owner": "John",
+      "record_type": "bmi",
+      "source": "Test sample",
+      "calculated_at": "2026-04-10",
+      "bmi": 25.5,
+      "category": "Overweight"
+    },
+    {
+      "owner": "John's wife",
+      "record_type": "medical_history",
+      "source": "Test sample",
+      "date": "2025-11-20",
+      "condition": "Annual health review completed",
+      "summary": "Routine consultation and preventive screening."
+    }
+  ],
+  "documents": [
+    {
+      "owner": "John",
+      "record_type": "aadhar_card",
+      "source": "Test sample",
+      "document_number": "TEST-AADHAR-000000000000",
+      "document_type": "Aadhaar",
+      "status": "Synthetic placeholder"
+    },
+    {
+      "owner": "John",
+      "record_type": "pan_card",
+      "source": "Test sample",
+      "document_number": "TESTPAN0001M",
+      "document_type": "PAN",
+      "status": "Synthetic placeholder"
+    },
+    {
+      "owner": "John",
+      "record_type": "passport",
+      "source": "Test sample",
+      "document_number": "TEST-PASSPORT-00001",
+      "document_type": "Passport",
+      "status": "Synthetic placeholder"
+    },
+    {
+      "owner": "John",
+      "record_type": "driving_license",
+      "source": "Test sample",
+      "document_number": "TEST-DL-00001",
+      "document_type": "Driving License",
+      "status": "Synthetic placeholder"
+    },
+    {
+      "owner": "John",
+      "record_type": "voter_id",
+      "source": "Test sample",
+      "document_number": "TEST-VOTER-00001",
+      "document_type": "Voter ID",
+      "status": "Synthetic placeholder"
+    },
+    {
+      "owner": "John",
+      "record_type": "ration_card",
+      "source": "Test sample",
+      "document_number": "TEST-RATION-00001",
+      "document_type": "Ration Card",
+      "status": "Synthetic placeholder"
+    },
+    {
+      "owner": "John's wife",
+      "record_type": "family_member",
+      "source": "Test sample",
+      "name": "Jane",
+      "relationship": "Wife",
+      "identification": "Synthetic test identity"
+    },
+    {
+      "owner": "John's son",
+      "record_type": "family_member",
+      "source": "Test sample",
+      "name": "Robert",
+      "relationship": "Son",
+      "identification": "Synthetic test identity"
+    }
+  ],
+  "history": [
+    {
+      "owner": "John",
+      "record_type": "school",
+      "source": "Test sample",
+      "name": "Test Public School",
+      "location": "Bengaluru",
+      "years": "2002-2007",
+      "qualification": "Secondary Education"
+    },
+    {
+      "owner": "John",
+      "record_type": "college",
+      "source": "Test sample",
+      "name": "Test Engineering College",
+      "location": "Bengaluru",
+      "years": "2007-2011",
+      "qualification": "Bachelor of Engineering"
+    },
+    {
+      "owner": "John",
+      "record_type": "previous_organization",
+      "source": "Test sample",
+      "name": "Tata Consultancy Services",
+      "department": "Software Engineering",
+      "period": "2012-2020",
+      "role": "Software Engineer"
+    },
+    {
+      "owner": "John",
+      "record_type": "current_organization",
+      "source": "Test sample",
+      "name": "Infosys Ltd.",
+      "location": "Bengaluru",
+      "period": "2020-present",
+      "role": "Technology Lead",
+      "department": "Information Technology"
+    },
+    {
+      "owner": "John",
+      "record_type": "vehicle",
+      "source": "Test sample",
+      "vehicle_type": "Four-wheeler",
+      "model": "Toyota Corolla",
+      "registration_number": "TEST-FOUR-WHEELER-001",
+      "purchase_year": 2021,
+      "insurance": {
+        "provider": "LIC",
+        "policy_number": "TEST-CAR-INSURANCE-001",
+        "coverage_amount": 1200000,
+        "renewal_date": "2027-06-15"
+      }
+    },
+    {
+      "owner": "John",
+      "record_type": "vehicle",
+      "source": "Test sample",
+      "vehicle_type": "Two-wheeler",
+      "model": "Hero Splendor",
+      "registration_number": "TEST-TWO-WHEELER-001",
+      "purchase_year": 2023,
+      "insurance": {
+        "provider": "IRDA",
+        "policy_number": "TEST-BIKE-INSURANCE-001",
+        "coverage_amount": 600000,
+        "renewal_date": "2027-02-28"
+      }
+    },
+    {
+      "owner": "John's family",
+      "record_type": "family_insurance",
+      "source": "Test sample",
+      "policy_type": "Life Insurance",
+      "provider": "LIC",
+      "coverage_amount": 5000000,
+      "members_covered": ["John", "Jane", "Robert"]
+    },
+    {
+      "owner": "John",
+      "record_type": "personal_accident_insurance",
+      "source": "Test sample",
+      "provider": "TATA AIA",
+      "coverage_amount": 1500000,
+      "policy_number": "TEST-PA-INSURANCE-001",
+      "valid_from": "2026-01-01",
+      "valid_to": "2027-01-01"
+    }
+  ]
+}

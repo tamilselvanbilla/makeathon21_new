@@ -1,21 +1,27 @@
-"""Minimal local voice assistant using faster-whisper and Ollama."""
+"""Minimal local voice assistant using Faster-Whisper and local Qwen GGUF."""
 
-import json
 import os
+import re
 import sys
 import time
-import urllib.error
-import urllib.request
+from pathlib import Path
 
 import numpy as np
 import sounddevice as sd
 from faster_whisper import WhisperModel
+from llama_cpp import Llama
 from scipy.signal import resample_poly
 
+from assistant_log import timed_event
+from control import ConsoleListenerState, PhysicalMuteSwitch
+from knowledge import find_relevant_records, load_knowledge
+from model_config import MODEL_CTX, MODEL_NAME, MODEL_PATH, MODEL_THREADS
+from privacy import can_send_audio, classify_request
+from reasoning_policy import require_local_answer
+from tts import speak
 
-WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "tiny")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/generate")
+
+WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL_SIZE", "base")
 TARGET_SAMPLE_RATE = 16_000
 MAX_RECORD_SECONDS = 15
 MAX_WAIT_FOR_SPEECH_SECONDS = 30
@@ -108,68 +114,102 @@ def speech_to_text(audio: np.ndarray, model: WhisperModel) -> str:
     """Transcribe a normalized mono waveform with Whisper."""
     if audio.size == 0:
         return ""
-    segments, _ = model.transcribe(audio, beam_size=5, language="en")
+    segments, _ = model.transcribe(
+        audio,
+        beam_size=5,
+        language="en",
+        vad_filter=True,
+    )
     return " ".join(segment.text.strip() for segment in segments).strip()
 
 
-def local_model(prompt: str) -> str:
-    """Send a prompt to a locally running Ollama server."""
-    body = json.dumps(
-        {"model": OLLAMA_MODEL, "prompt": prompt, "stream": False}
-    ).encode("utf-8")
-    request = urllib.request.Request(
-        OLLAMA_URL,
-        data=body,
-        headers={"Content-Type": "application/json"},
-        method="POST",
+def local_model(prompt: str, model: Llama) -> str:
+    """Generate a response from the configured local model."""
+    with timed_event(
+        "llm_generation",
+        model=MODEL_NAME,
+        max_tokens=150,
+    ):
+        response = model(
+            prompt,
+            max_tokens=150,
+            temperature=0.2,
+            top_p=0.95,
+            stop=["User:", "Assistant:", "Answer:"],
+        )
+    return clean_model_response(str(response["choices"][0]["text"]).strip())
+
+
+def clean_model_response(response: str) -> str:
+    """Remove labels, serialized records, and duplicate sentences."""
+    cleaned = re.sub(
+        r"(?is)\s*(?:\[(?:financial|medical|documents|history)\]\s*)?\{[^{}]*\}",
+        " ",
+        response,
     )
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            result = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, TimeoutError) as exc:
-        raise RuntimeError(
-            "Cannot reach Ollama. Start Ollama and make sure the configured "
-            f"model '{OLLAMA_MODEL}' is available."
-        ) from exc
-    return str(result.get("response", "")).strip()
+    cleaned = re.sub(
+        r"(?i)\b(?:assistant|answer)\s*[:\-]\s*",
+        "",
+        cleaned,
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    sentences = [
+        sentence.strip()
+        for sentence in re.split(r"(?<=[.!?])\s+", cleaned)
+        if sentence.strip()
+    ]
+
+    unique_sentences: list[str] = []
+    seen_sentences: set[str] = set()
+    for sentence in sentences:
+        normalized = sentence.casefold()
+        if normalized in seen_sentences:
+            continue
+        seen_sentences.add(normalized)
+        unique_sentences.append(sentence)
+
+    return " ".join(unique_sentences).strip()
 
 
-def personal_database(_intent: str) -> str:
-    """No personal-data store is configured yet; do not invent personal facts."""
-    return "No personal database is configured."
-
-
-def speak(text: str) -> None:
-    """Print the reply and speak it when pyttsx3 is installed."""
-    print(f"Assistant: {text}")
-    try:
-        import pyttsx3
-    except ImportError:
-        print("(Install pyttsx3 to enable spoken replies.)")
-        return
-
-    engine = pyttsx3.init()
-    engine.say(text)
-    engine.runAndWait()
-    engine.stop()
+def personal_database(question: str) -> str:
+    """Return configured JSON records relevant to the user's request."""
+    return find_relevant_records(question, load_knowledge())
 
 
 def main() -> None:
     print("Available microphones:")
     input_device = choose_input_device()
+    mute_switch = PhysicalMuteSwitch()
+    listener_state = ConsoleListenerState()
+    print(f"Loading local model '{MODEL_NAME}' from '{MODEL_PATH}'...")
+    model = Llama(
+        model_path=str(MODEL_PATH),
+        n_ctx=MODEL_CTX,
+        n_threads=MODEL_THREADS,
+        verbose=False,
+    )
     print(f"Loading Whisper '{WHISPER_MODEL_SIZE}'...")
     whisper = WhisperModel(
         WHISPER_MODEL_SIZE,
         device="cpu",
         compute_type="int8",
     )
-    print("Ready. Say 'quit' or 'exit' to stop.")
+    print("Ready. Listening for speech. Mute with the physical switch.")
 
     while True:
+        if mute_switch.is_muted():
+            listener_state.set_listening(False)
+            print("Listening disabled by mute switch.")
+            continue
+
+        listener_state.set_listening(True)
         audio, _ = record_until_silence(input_device)
+        listener_state.set_listening(False)
+        if not audio.size:
+            continue
+
         question = speech_to_text(audio, whisper)
         if not question:
-            print("No speech detected; listening again.")
             continue
 
         print(f"You: {question}")
@@ -178,18 +218,27 @@ def main() -> None:
             break
 
         try:
-            intent = local_model(
-                "Extract the personal-information lookup intent from this "
-                f"question in one short sentence. Question: {question}"
-            )
-            data = personal_database(intent)
+            request_type = classify_request(question)
+            data = personal_database(question)
             answer = local_model(
-                "Answer the user's question concisely. Do not invent personal "
-                "facts; say when requested information is unavailable.\n"
-                f"Question: {question}\nPersonal data: {data}"
+                "You are a private personal assistant acting as a financial "
+                "adviser, medical adviser, personal document maintainer, "
+                "and professional history maintainer. Use only the supplied "
+                "knowledge and the user's question. Never invent medical, "
+                "financial, document, or history information. For medical or "
+                "financial decisions, state uncertainty and recommend qualified "
+                "professional guidance. Return only one concise answer, explain "
+                "the relevant facts in natural language, and never reproduce "
+                "raw JSON or category-prefixed records. Do not repeat sentences "
+                "or labels such as Answer:.\n"
+                f"Request type: {request_type}\n"
+                f"Question: {question}\nKnowledge: {data}",
+                model,
             )
-            speak(answer or "I couldn't generate a response.")
-        except RuntimeError as exc:
+            answer = require_local_answer(answer)
+            if not can_send_audio(True):
+                speak(answer or "I couldn't generate a response.")
+        except (RuntimeError, KeyError, IndexError) as exc:
             print(f"Error: {exc}")
             break
 
