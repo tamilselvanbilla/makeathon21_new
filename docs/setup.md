@@ -432,7 +432,8 @@ not recommended.
 | The wrong microphone is selected | Set `MIC_DEVICE` to part of the right device's name, e.g. `MIC_DEVICE=USB` |
 | It never starts recording | Your mic is quiet: lower `SPEECH_RMS_THRESHOLD` (e.g. `200`) |
 | Every recording runs the full 15 s | Background noise never drops below the threshold: raise `SPEECH_RMS_THRESHOLD` (e.g. `800`) |
-| `microphone input overflowed` warnings | The CPU is overloaded: close other programs, check `vcgencmd get_throttled` |
+| `Warning: microphone overflowed N time(s)` | Audio is queued by PortAudio's own thread with a large buffer, so this now means the Pi fell more than 30 s behind or the device itself overran: check `vcgencmd get_throttled` (0x0 = fine), cooling, and that nothing else uses the microphone. No pip package is needed |
+| "Hey Sam" is not recognised | Run with `WAKE_DEBUG=1` to see what Whisper heard. If the name is misheard, speak closer to the mic or raise its level (`alsamixer`, F4 for capture); if every utterance is cut short, raise `SILENCE_SECONDS` (e.g. `1.2`) |
 | `audio open error: Unknown error 524` | espeak-ng's own playback found no sound server. Update to this version (it plays through `aplay` instead) and set `AUDIO_OUTPUT_DEVICE=plughw:CARD=Headphones` for the 3.5 mm jack (section 4.5) |
 | `Speech output failed: aplay: ... No such file or directory` / `Device or resource busy` | Wrong device name, or a desktop sound server holds the card: check `scripts/run.sh --list-speakers`; on Pi OS Desktop use `AUDIO_OUTPUT_DEVICE=default` |
 | No spoken reply, no error | Audio is going to HDMI or is muted: set `AUDIO_OUTPUT_DEVICE` (section 4.5) and raise volume with `alsamixer` |

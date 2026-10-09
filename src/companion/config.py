@@ -120,6 +120,7 @@ class WakeWordConfig:
     enabled: bool
     phrase: str
     conversation_timeout: float
+    debug: bool
 
     @classmethod
     def from_env(cls) -> "WakeWordConfig":
@@ -129,6 +130,9 @@ class WakeWordConfig:
             phrase=os.getenv("WAKE_PHRASE", "hey sam"),
             # After waking, follow-ups need no wake phrase until this much silence.
             conversation_timeout=_env_float("CONVERSATION_TIMEOUT", 30),
+            # Print what was heard when speech is ignored, to diagnose a missed wake phrase.
+            # Off by default: ignored speech is otherwise never shown or kept.
+            debug=_env_bool("WAKE_DEBUG", False),
         )
 
 

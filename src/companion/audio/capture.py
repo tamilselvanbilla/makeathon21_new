@@ -5,6 +5,7 @@ The microphone is read as a stream of 80 ms frames of 16 kHz int16 audio.
 without hardware.
 """
 
+import queue
 import re
 from contextlib import closing
 from typing import Callable, Iterable, Iterator
@@ -16,6 +17,9 @@ from ..config import CaptureConfig
 TARGET_RATE = 16_000
 FRAME_SAMPLES = 1280
 FRAME_SECONDS = FRAME_SAMPLES / TARGET_RATE  # 0.08 s
+# Audio waiting to be processed: up to 30 s, so a long stall (model loading, a busy
+# Pi) delays processing instead of losing audio; beyond that, the oldest is dropped.
+MAX_QUEUED_BLOCKS = int(30 / FRAME_SECONDS)
 
 
 def record_command(
@@ -118,6 +122,9 @@ class MicrophoneCapture:
         self.device_name = sd.query_devices(device, "input")["name"]
         self.sample_rate = self._pick_sample_rate()
         self.block_size = round(self.sample_rate * FRAME_SECONDS)
+        self._stream = None
+        self._blocks: queue.Queue = queue.Queue()
+        self._overflows = 0
 
     def _pick_sample_rate(self) -> int:
         """Prefer capturing at 16 kHz natively to skip resampling on the Pi."""
@@ -133,19 +140,72 @@ class MicrophoneCapture:
             return int(self._sd.query_devices(self.device, "input")["default_samplerate"])
 
     def frames(self, should_abort: Callable[[], bool] = lambda: False) -> Iterator[np.ndarray]:
-        """Yield 80 ms int16 frames at 16 kHz until `should_abort` returns true."""
-        with self._sd.InputStream(
+        """Yield 80 ms int16 frames at 16 kHz until `should_abort` returns true.
+
+        The microphone stays open between utterances, so speech that starts while the
+        previous utterance is being transcribed is still captured (on a Pi that takes
+        seconds, and used to clip "Hey Sam"). PortAudio's audio thread queues each block
+        as it arrives, so a slow moment here (resampling, garbage collection, a busy Pi)
+        delays processing instead of overflowing the sound card's buffer. When
+        `should_abort` fires (the mute switch), the microphone is closed.
+        """
+        self._open()
+        while not should_abort():
+            try:
+                chunk = self._blocks.get(timeout=0.2)
+            except queue.Empty:
+                continue  # no audio yet; re-check mute
+            yield self._to_16k(chunk.reshape(-1))
+        self.close()  # muted: the microphone is off, and queued audio is discarded
+        self._report_overflow()
+
+    def _open(self) -> None:
+        if self._stream is not None:
+            return
+        self._blocks = queue.Queue(maxsize=MAX_QUEUED_BLOCKS)
+        self._overflows = 0
+
+        def on_audio(indata, frames, time_info, status) -> None:
+            if status.input_overflow:
+                self._overflows += 1
+            try:
+                self._blocks.put_nowait(indata.copy())
+            except queue.Full:  # 30 s behind: drop the oldest block, keep the newest
+                self._overflows += 1
+                self._blocks.get_nowait()
+                self._blocks.put_nowait(indata.copy())
+
+        self._stream = self._sd.InputStream(
             device=self.device,
             channels=1,
             samplerate=self.sample_rate,
             dtype="int16",
             blocksize=self.block_size,
-        ) as stream:
-            while not should_abort():
-                chunk, overflowed = stream.read(self.block_size)
-                if overflowed:
-                    print("Warning: microphone input overflowed; audio may be incomplete.")
-                yield self._to_16k(chunk.reshape(-1))
+            latency="high",  # a larger device buffer rides out scheduling hiccups
+            callback=on_audio,
+        )
+        self._stream.start()
+
+    def discard_pending(self) -> None:
+        """Drop queued audio, e.g. the assistant's own voice captured while it spoke."""
+        if self._stream is not None:
+            while True:
+                try:
+                    self._blocks.get_nowait()
+                except queue.Empty:
+                    break
+
+    def close(self) -> None:
+        if self._stream is not None:
+            self._stream.stop()
+            self._stream.close()
+            self._stream = None
+        self.discard_pending()
+
+    def _report_overflow(self) -> None:
+        if self._overflows:
+            print(f"Warning: microphone overflowed {self._overflows} time(s); some audio was lost.")
+            self._overflows = 0
 
     def _to_16k(self, chunk: np.ndarray) -> np.ndarray:
         if self.sample_rate == TARGET_RATE:
@@ -165,4 +225,6 @@ class MicrophoneCapture:
         (default MAX_WAIT_FOR_SPEECH_SECONDS), then stop after silence."""
         wait = self.config.max_wait_for_speech_seconds if max_wait_seconds is None else max_wait_seconds
         with closing(self.frames(should_abort)) as frames:
-            return record_command(frames, self.config, wait)
+            audio = record_command(frames, self.config, wait)
+        self._report_overflow()
+        return audio

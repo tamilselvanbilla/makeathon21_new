@@ -44,7 +44,7 @@ class AudioCapture(Protocol):
 
 
 class SpeechToText(Protocol):
-    def transcribe(self, audio: np.ndarray) -> str: ...
+    def transcribe(self, audio: np.ndarray, use_hotwords: bool = True, hotwords: str | None = None) -> str: ...
 
 
 class InputSource(Protocol):
@@ -83,7 +83,9 @@ class MicInput:
         indicator: Indicator,
         wake: WakePhrase | None = None,
         conversation_timeout: float = 30.0,
+        debug: bool = False,
     ):
+        self.debug = debug
         self.capture = capture
         self.transcriber = transcriber
         self.mute = mute
@@ -91,6 +93,12 @@ class MicInput:
         self.wake = wake
         self.conversation_timeout = conversation_timeout
         self.awake = wake is None
+
+    def after_reply(self) -> None:
+        """The assistant just spoke: drop the audio of its own voice."""
+        discard = getattr(self.capture, "discard_pending", None)
+        if discard:
+            discard()
 
     def _go_to_sleep(self, reason: str) -> None:
         if self.wake and self.awake:
@@ -135,9 +143,15 @@ class MicInput:
 
     def _request_after_wake_phrase(self, audio: np.ndarray) -> str:
         head = audio[: int(WAKE_CHECK_SECONDS * SAMPLE_RATE)]
-        request = self.wake.strip(self.transcriber.transcribe(head))
+        # Only the wake name as a hint: "Sam" is otherwise often heard as "sir". A lone
+        # hallucinated "Sam" can't wake the device, since a greeting must precede it.
+        heard = self.transcriber.transcribe(head, hotwords=self.wake.hotwords())
+        request = self.wake.strip(heard)
         if request is None:
-            print("[IDLE] speech ignored: no wake phrase (nothing kept)")
+            if self.debug:
+                print(f"[IDLE] speech ignored: no wake phrase in {heard!r} (WAKE_DEBUG)")
+            else:
+                print("[IDLE] speech ignored: no wake phrase (nothing kept)")
             return ""
         if audio.size > head.size:
             # The request continued past the checked part: transcribe all of it.
@@ -319,5 +333,8 @@ class Assistant:
 
             self.indicator.show(IndicatorState.SPEAKING)
             self.speaker.say(reply)
+            after_reply = getattr(source, "after_reply", None)
+            if after_reply:
+                after_reply()  # don't treat the assistant's own voice as the next request
             self.indicator.show(IndicatorState.IDLE)
 

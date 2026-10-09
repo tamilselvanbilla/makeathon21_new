@@ -69,7 +69,9 @@ def main(argv: list[str] | None = None) -> None:
                 f"Wake phrase: '{wake.phrase}' (conversation stays open "
                 f"{config.wake_word.conversation_timeout:.0f} s after each reply)"
             )
-        hotwords = " ".join(filter(None, [wake.hotwords() if wake else "", config.stt.hotwords, config.default_place]))
+        # Vocabulary for requests only; the wake check runs without hotwords (they get
+        # echoed on noise), and the wake name is not needed after waking.
+        hotwords = " ".join(filter(None, [config.stt.hotwords, config.default_place]))
         transcriber = Transcriber(config.stt, hotwords=hotwords)
         source = MicInput(
             capture,
@@ -78,6 +80,7 @@ def main(argv: list[str] | None = None) -> None:
             indicator,
             wake,
             config.wake_word.conversation_timeout,
+            debug=config.wake_word.debug,
         )
 
     speaker = PrintSpeaker() if args.text or args.no_tts or not config.tts_enabled else make_speaker()

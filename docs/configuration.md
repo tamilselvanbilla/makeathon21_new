@@ -108,6 +108,7 @@ downloaded and there is no extra licence (Whisper and faster-whisper are MIT).
 | `WAKE_WORD` | `1` | `0` treats any speech as a request (same as `--no-wake-word`) |
 | `WAKE_PHRASE` | `hey sam` | Any phrase. With a greeting in the phrase, any greeting works ("Hey Sam", "Hi Sam", "OK Sam") but one is required; a phrase without one (`jarvis`) is accepted on its own |
 | `CONVERSATION_TIMEOUT` | `30` | Seconds of silence after a reply before it needs the wake phrase again |
+| `WAKE_DEBUG` | `0` | `1` prints what Whisper heard when speech is ignored, to diagnose a missed wake phrase. Off by default: ignored speech is otherwise never shown |
 | `WHISPER_HOTWORDS` | `EMI PAN Aadhaar` | Words Whisper should favour. The wake name and `DEFAULT_PLACE` are added automatically |
 
 **Choosing a wake phrase:** use a name Whisper spells consistently, i.e. real words

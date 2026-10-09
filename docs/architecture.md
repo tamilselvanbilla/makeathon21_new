@@ -60,7 +60,11 @@ stateDiagram-v2
 
 1. **Mute check.** `MicInput` asks the `MuteSwitch`. If muted, the indicator shows
    `MUTED` and the microphone is never opened.
-2. **Capture.** `MicrophoneCapture.frames` streams 80 ms frames of 16 kHz audio
+2. **Capture.** The microphone stays open between utterances (closed only when muted), so
+   speech that starts while the previous utterance is being transcribed is not lost. PortAudio's
+   audio thread queues each block (with `latency="high"`), so slow moments delay processing
+   instead of overflowing the device buffer; audio heard while the assistant speaks is discarded.
+   `MicrophoneCapture.frames` streams 80 ms frames of 16 kHz audio
    (resampled if the mic can't do 16 kHz). `record_command` keeps audio once loudness
    passes `SPEECH_RMS_THRESHOLD` and stops after `SILENCE_SECONDS` of quiet. If the
    mute switch flips, the stream stops and the audio is discarded.
@@ -223,7 +227,7 @@ stateDiagram-v2
 |---|---|
 | Match | The transcript must **start** with a greeting and the name ("Hey Sam", "Hi Sam", "OK Sam"), and the name must be addressed: followed by a pause or a request word ("Hey Sam what's…"). "Sam is coming for dinner", "Hey, Sam called…" and "I saw Sam…" do not wake it |
 | Cost while asleep | Only the first `WAKE_CHECK_SECONDS` (3 s) of each utterance are transcribed; the full utterance is transcribed only after a match |
-| Accuracy | Whisper is given `hotwords` (wake name, EMI, PAN, Aadhaar, default place), which fixed "EMI" being heard as "UI" with `tiny.en` and caused no false wakes on silence, noise, or unrelated speech in testing |
+| Accuracy | The wake check gives Whisper only the wake name as a hint ("Sam" is otherwise often heard as "sir"); a list of hint words gets echoed as speech on room noise ("my name is Sam EMI PAN"), and such echoes are dropped. Requests use the vocabulary hint (EMI, PAN, Aadhaar, default place). With `tiny.en` and added noise, "Hey Sam" was recognised 12/12, 12/12, 11/12 (clean, 20 dB, 10 dB SNR) with no false wakes |
 | Privacy | Ignored speech is transcribed in memory and discarded; its text is never printed, logged, or stored |
 | Never exits by voice | "Exit", "stop" and "goodbye" end the conversation; the program stops only with `Ctrl+C` |
 
