@@ -321,8 +321,9 @@ curl -fL -o models/llm/Qwen3-0.6B-Q4_K_M.gguf \
 sha256sum models/llm/Qwen3-0.6B-Q4_K_M.gguf     # macOS: shasum -a 256
 # expected: ac2d97712095a558e31573f62f466a3f9d93990898b0ec79d7c974c1780d524a
 
-# Run (the first voice run downloads the Whisper model, so leave HF_HUB_OFFLINE
-# unset for that one run, or use setup.sh which caches it)
+# Cache the Whisper model once (the app itself never downloads it)
+.venv/bin/python -c "from faster_whisper import WhisperModel; WhisperModel('tiny.en', device='cpu', compute_type='int8')"
+
 .venv/bin/python src/main.py --text
 ```
 
@@ -403,7 +404,7 @@ not recommended.
 | `set: Illegal option -o pipefail` | Old scripts run with `sh` (dash). Pull the latest version, which re-runs itself under bash, or start it with `bash scripts/run.sh` |
 | `bash\r: No such file or directory` / `$'\r': command not found` | The scripts have Windows line endings. Pull again (`.gitattributes` now forces LF) or fix in place: `sed -i 's/\r$//' scripts/*.sh` |
 | `Do not run setup with sudo` | Run `scripts/setup.sh` as your normal user; it calls `sudo` only for `apt`. If a root-owned `.venv` exists from an earlier sudo run, remove it with `sudo rm -r .venv` and re-run setup |
-| Error mentioning `HF_HUB_OFFLINE` or "cannot find the requested files in the local cache" | That Whisper size was never cached: run setup with the same `WHISPER_MODEL_SIZE` (section 8) |
+| `Whisper model '...' is not downloaded` | That Whisper size was never cached; the app never downloads models itself. Run setup with the same `WHISPER_MODEL_SIZE` (section 8) |
 | `No microphone input devices were found` | Check `arecord -l`; add your user to the audio group: `sudo usermod -aG audio $USER`, then log out and in |
 | `Device N is not an available microphone` | `MIC_DEVICE` points at an output-only device; pick one whose `--list-mics` entry shows at least `1 in` |
 | It never starts recording | Your mic is quiet: lower `SPEECH_RMS_THRESHOLD` (e.g. `200`) |

@@ -145,8 +145,10 @@ tests/                            unit tests (run without models or audio hardwa
 3. **One network exit.** Only `online_gateway.py` may import networking code. It accepts
    plain text only, refuses requests mentioning private data (financial, medical,
    documents, recordings), and only contacts allowlisted hosts.
-4. **Models are offline at runtime.** `run.sh` sets `HF_HUB_OFFLINE=1`, so model libraries
-   cannot download or report anything.
+4. **Models are offline at runtime.** Every model loads from local files only (Whisper with
+   `local_files_only=True`, the others from `models/`), however the app is started; `run.sh`
+   additionally sets `HF_HUB_OFFLINE=1`. A traced session made no connections except the
+   two Open-Meteo calls for a weather question.
 5. **Memory stays on the device and can be erased.** Notes and past questions and answers
    are kept as text in `data/memory.sqlite3` (git-ignored), deleted after 30 days, and
    erased on request ("forget that", "forget everything"). Audio and ignored speech are

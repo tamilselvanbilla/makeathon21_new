@@ -16,12 +16,23 @@ class Transcriber:
 
         self.config = config
         self.hotwords = hotwords
-        self._model = WhisperModel(
-            config.model_size,
-            device="cpu",
-            compute_type="int8",
-            cpu_threads=config.threads,
-        )
+        try:
+            # Cached models only: without this, faster-whisper contacts huggingface.co at
+            # every start to check for updates. scripts/setup.sh downloads the model.
+            self._model = WhisperModel(
+                config.model_size,
+                device="cpu",
+                compute_type="int8",
+                cpu_threads=config.threads,
+                local_files_only=True,
+            )
+        except Exception as exc:
+            if type(exc).__name__ != "LocalEntryNotFoundError":
+                raise
+            raise FileNotFoundError(
+                f"Whisper model '{config.model_size}' is not downloaded. Run scripts/setup.sh "
+                f"(for another size: WHISPER_MODEL_SIZE={config.model_size} scripts/setup.sh --skip-system)."
+            ) from None
 
     def transcribe(self, audio: "np.ndarray | str") -> str:
         """Transcribe a 16 kHz float32 waveform or an audio file path."""

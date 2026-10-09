@@ -187,7 +187,7 @@ or to an honest "not found".
 | Only factual lookups go out | `route` sends a question online only if it is about weather/news/search and mentions no financial, medical, document, recording, personal, or private data; only weather is implemented |
 | Only known hosts are contacted | `check_host_allowed` validates each URL against `ALLOWED_HOSTS` |
 | Users can switch it off | `--offline` or `ONLINE_LOOKUPS=0` |
-| Models never phone home | `run.sh` sets `HF_HUB_OFFLINE=1` |
+| Models never phone home | Whisper loads with `local_files_only=True` (without it, faster-whisper contacts huggingface.co at every start); the LLM and embedding models are plain local files; `run.sh` also sets `HF_HUB_OFFLINE=1` |
 | Online moments are visible | The indicator shows `ONLINE` only while the gateway is in use |
 
 ## Wake phrase
