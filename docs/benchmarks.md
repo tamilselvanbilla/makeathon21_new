@@ -4,6 +4,7 @@ Two benchmarks back the model choices. Both run on the device with one command,
 so the numbers can be re-measured on the Raspberry Pi.
 
 - [Language model](#language-model): which small LLM reasons best on this assistant's job
+- [Knowledge retrieval](#knowledge-retrieval): finding the right personal record for natural spoken questions
 - [Memory retrieval](#memory-retrieval): keywords vs embeddings for finding remembered notes
 
 ---
@@ -81,6 +82,26 @@ instructions, so expect less on the Pi.
 8. **Weather advice from probabilities is unreliable** for every model without thinking
    ("likely to rain" or "carry an umbrella just in case" at 5%).
 
+### System prompt variants
+
+The system prompt describes the assistant's role (keeper of the user's and family's
+financial, insurance, medical, health and identity records, answering from the knowledge
+base). Wording matters a lot for small models; four variants were measured on the same 32
+cases:
+
+| Prompt | Qwen3-0.6B | Style | Qwen3-1.7B | Style | Notes |
+|---|---|---|---|---|---|
+| Original | 69% | 94% | 78% | 97% | Refused general questions ("leap year": "not in the knowledge") |
+| A: persona ("You are Sam…") + scope rules | 69% | 84% | 75% | 94% | 0.6B spoke as the user ("I am John."); 1.7B refused "capital of France" |
+| B: persona, user identity first, separate rules for personal vs general | 62% | 81% | **84%** | 94% | Best for 1.7B; 0.6B kept speaking as the user |
+| **C: original structure + role, record types, family, general-knowledge and identity-number rules (shipped)** | **69%** | **97%** | 75% | 100% | General 4/4 for 0.6B; no persona name (the name is in the welcome message) |
+
+C is shipped because it suits the default Qwen3-0.6B; if the device moves to Qwen3-1.7B,
+variant B scores higher. Differences of one or two cases (3–6%) are within noise for a
+32-case set. The two honesty cases the 0.6B model still fails (passport expiry, wife's
+blood pressure) are caught by the app before the model is asked: retrieval finds no such
+record and the app answers "I couldn't find that in your personal records".
+
 ### What this suggests
 
 - Stay with the **Qwen3 family** (Apache-2.0, best accuracy and honesty per MB).
@@ -93,6 +114,44 @@ instructions, so expect less on the Pi.
   weather advice rule-based.
 
 ---
+
+## Knowledge retrieval
+
+```bash
+.venv/bin/python -m unittest tests.test_privacy_and_control.RetrievalBenchmarkTests
+```
+
+`tests/data/knowledge_retrieval_eval.json`: natural spoken questions over the records,
+each with the record type the top result must have, or `null` when retrieval must find
+nothing (so the assistant says it isn't recorded rather than guessing).
+
+A live session showed retrieval failing on ordinary speech ("what are the medications I
+am taking daily?" → "couldn't find that"; "about my medications" → the blood-test report).
+Measured, then fixed:
+
+| Version | Main set (40 answerable) | Must find nothing (6) | Unseen set A (20) | Unseen set B (15) |
+|---|---|---|---|---|
+| Before | 15/40 | 6/6 | — | — |
+| + filler words, synonyms, own-word ranking | 40/40 | 6/6 | 12/20 | — |
+| + one record must cover the question, acronyms, no type filter | 39/40 | 6/6 | 18/20 | 13/15 *(first run, untuned)* |
+| + named entities, category-collision rule (shipped) | 40/40 | 6/6 | 19/20 | 15/15 |
+
+Sets A and B were written after the main set and scored before tuning on them; later
+fixes did use them, so the final numbers are optimistic. The first untuned scores (12/20,
+13/15) are the honest estimate for brand-new phrasings at each step.
+
+Lessons:
+- **Synonyms alone don't generalise**: the first version scored 40/40 on its own questions
+  but 12/20 on new ones. The structural rules (one record must cover the whole question;
+  names may point elsewhere; acronyms; stem collisions) fixed whole classes of misses.
+- **Word-level embeddings did not help**: MiniLM similarity between a question word and a
+  record field was as high for wrong pairs ("expire" ↔ a bond's maturity date, 0.50) as for
+  right ones ("SBI" ↔ State Bank of India, 0.35), so no threshold separates them.
+- **Known miss**: "which medicine my **doctor** prescribed" finds nothing: no record names
+  a doctor, and mapping "doctor" to the prescription would make "who is my family doctor?"
+  answer wrongly.
+- With the right record in context, Qwen3-0.6B still refused "what are the medications I am
+  taking daily?" ("not recorded"); Qwen3-1.7B answered it correctly.
 
 ## Memory retrieval
 

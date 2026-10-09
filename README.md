@@ -45,7 +45,7 @@ keeps working with the network cable unplugged.
 | Online calls limited to factual lookups | ✅ Done | Weather (Open-Meteo), **share market** (Yahoo Finance prices, AMFI fund NAVs) and **news** (The Hindu, BBC RSS). Only public identifiers leave the device (a place, ticker symbols, fund codes, a feed address); holdings, topics and questions stay local, and all arithmetic is done on the device. Each feature can be switched off |
 | Honest fallback instead of guessing | 🟡 Basic | `brain/policy.py`; signal-based fallback is planned |
 | Working demo in a human-potential domain | ✅ Memory & recall | Personal records (`knowledge_base/`), notes ("remember that I parked on B2"), past conversations ("what did you tell me about my EMI?") and follow-ups ("and my wife's?"), all stored on the device. Hybrid search (keywords + a 23 MB embedding model) finds paraphrases ("power tool", "travel documents"); answers found only by meaning are hedged |
-| Continuous sensing with **wake word** | ✅ Done | "Hey Jarvis" spotted in Whisper transcripts (no wake-word model, MIT licence); after waking, follow-up questions need no wake phrase until 30 s of silence or "that's all" |
+| Continuous sensing with **wake word** | ✅ Done | "Hey Sam" spotted in Whisper transcripts (a greeting is required, so talk *about* a Sam doesn't wake it) (no wake-word model, MIT licence); after waking, follow-up questions need no wake phrase until 30 s of silence or "that's all" |
 | **Physical mute switch** | ⏳ Next | Interface and software switch done; GPIO driver planned |
 | **Visible listening light** | ⏳ Next | All states implemented, printed to the console; LED driver planned |
 
@@ -70,8 +70,7 @@ and adjusts its defaults.
 git clone <this repo> && cd makeathon21_new
 scripts/setup.sh                 # one-time install; nothing is compiled on the Pi
 scripts/run.sh --text            # type to it first, to check the language model
-scripts/run.sh --list-mics       # find your microphone index
-MIC_DEVICE=1 scripts/run.sh      # talk to it
+scripts/run.sh                   # talk to it (the microphone is picked automatically)
 ```
 
 `setup.sh` installs system packages, creates `.venv`, installs Python dependencies,
@@ -93,10 +92,13 @@ the tests. For each step explained, manual installation, and troubleshooting, se
 | `scripts/run.sh --list-speakers` | List audio outputs (Pi 4 aux jack: `plughw:CARD=Headphones`) |
 | `scripts/run.sh --speaker-test` | Speak a test phrase through `AUDIO_OUTPUT_DEVICE` |
 
+On start-up the assistant introduces itself: *"Hello John, I'm Sam, your private assistant.
+Say "Hey Sam" to start."*
+
 Try asking:
 
 - "What is my monthly income?" (answered locally from `knowledge_base/personal_data.json`)
-- "Hey Jarvis, what's the weather in Bengaluru?" (only "Bengaluru" and "today" go online; the console shows `[ONLINE]` and `[LOCAL]` steps)
+- "Hey Sam, what's the weather in Bengaluru?" (only "Bengaluru" and "today" go online; the console shows `[ONLINE]` and `[LOCAL]` steps)
 - then, without the wake phrase: "Do I need an umbrella tomorrow?", and finally "That's all, thanks." to end the conversation
 - "Remember that I parked on level B2" … later, even after a restart: "Where did I park?"
 - "What is my monthly income?" then "And my wife's?"; later "What did you tell me about my wife's income?"

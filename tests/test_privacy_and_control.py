@@ -1,9 +1,11 @@
 import ast
+import json
 import contextlib
 import io
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -15,16 +17,17 @@ SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
 from companion.brain import policy  # noqa: E402
-from companion.brain.knowledge import KnowledgeBase  # noqa: E402
+from companion.brain.knowledge import KnowledgeBase, load_knowledge  # noqa: E402
 from companion.brain.memory import (  # noqa: E402
     ConversationMemory,
     MemoryCommand,
     note_answer,
     parse_memory_command,
 )
-from companion.brain.prompts import NOT_IN_RECORDS_ANSWER  # noqa: E402
+from companion.brain.prompts import NO_RECORDS, NOT_IN_RECORDS_ANSWER, build_system_prompt, build_welcome  # noqa: E402
 from companion.brain.llm import clean_model_response  # noqa: E402
-from companion.audio.capture import record_command  # noqa: E402
+from companion.audio.capture import pick_microphone, record_command  # noqa: E402
+from companion.audio.stt import looks_like_noise, reliable  # noqa: E402
 from companion.brain.router import Intent, extract_place, parse_lookup, route  # noqa: E402
 from companion.config import CaptureConfig  # noqa: E402
 from companion.device.indicator import ConsoleIndicator, IndicatorState  # noqa: E402
@@ -186,7 +189,7 @@ def conversation(transcripts, seconds=(1,), muted=False, timeout=30):
     transcriber = FakeTranscriber(*transcripts)
     indicator = RecordingIndicator()
     source = MicInput(
-        capture, transcriber, SoftwareMuteSwitch(muted), indicator, WakePhrase("hey jarvis"), timeout
+        capture, transcriber, SoftwareMuteSwitch(muted), indicator, WakePhrase("hey sam"), timeout
     )
     return source, capture, transcriber, indicator
 
@@ -340,9 +343,11 @@ class PrivacyTests(unittest.TestCase):
 
 class ReasoningTests(unittest.TestCase):
     def test_local_reasoning_has_fallback(self):
-        self.assertTrue(policy.should_fallback("I cannot answer this accurately"))
-        self.assertTrue(policy.should_fallback("   "))
-        self.assertFalse(policy.should_fallback("Here is the answer"))
+        self.assertTrue(policy.is_uncertain("I cannot answer this accurately"))
+        self.assertTrue(policy.is_uncertain("   "))
+        self.assertFalse(policy.is_uncertain("Here is the answer"))
+        self.assertEqual(policy.require_local_answer("  "), policy.LOCAL_FALLBACK_ANSWER)
+        self.assertEqual(policy.require_local_answer("It is not recorded."), "It is not recorded.")
 
     def test_thinking_trace_and_duplicates_are_removed(self):
         raw = "<think>\nlet me reason\n</think>\n\nAnswer: It is sunny. It is sunny."
@@ -363,6 +368,12 @@ class ReasoningTests(unittest.TestCase):
         self.assertIs(route("when is my train"), Intent.LOCAL_REASONING)
         self.assertIs(route("where is my umbrella?"), Intent.LOCAL_REASONING)
         self.assertIs(route("do I need an umbrella tomorrow?"), Intent.ONLINE_LOOKUP)
+
+    def test_replies_speak_to_the_user(self):
+        self.assertEqual(clean_model_response("The validity period of my insurance ends in 2027."),
+                         "The validity period of your insurance ends in 2027.")
+        self.assertEqual(clean_model_response("My EMI is INR 9200."), "Your EMI is INR 9200.")
+        self.assertEqual(clean_model_response("Let me know if you need more."), "Let me know if you need more.")
 
     def test_router(self):
         self.assertIs(route("Exit."), Intent.EXIT)
@@ -416,7 +427,8 @@ class KnowledgeSearchTests(unittest.TestCase):
         self.assertIn("'emi' refers to installment", self.kb.context_for("what is my EMI"))
 
     def test_top_k_limits_results(self):
-        self.assertEqual(len(KnowledgeBase(SAMPLE_RECORDS, top_k=1).search("my monthly income loan")), 1)
+        self.assertEqual(len(KnowledgeBase(SAMPLE_RECORDS).search("do I have insurance")), 2)
+        self.assertEqual(len(KnowledgeBase(SAMPLE_RECORDS, top_k=1).search("do I have insurance")), 1)
 
     def test_fts_operators_in_questions_are_harmless(self):
         self.assertEqual(self.kb.search('income" OR NOT * ('), self.kb.search("income"))
@@ -424,6 +436,69 @@ class KnowledgeSearchTests(unittest.TestCase):
     def test_personal_question_detection(self):
         self.assertTrue(self.kb.is_personal("where did I park"))
         self.assertFalse(self.kb.is_personal("what is the capital of France"))
+
+
+class RetrievalBenchmarkTests(unittest.TestCase):
+    """Natural spoken questions over the real records (tests/data/knowledge_retrieval_eval.json)."""
+
+    def test_every_question_finds_the_right_record_or_nothing(self):
+        kb = KnowledgeBase(load_knowledge())
+        failures = []
+        for case in json.loads((ROOT / "tests" / "data" / "knowledge_retrieval_eval.json").read_text())["cases"]:
+            if case.get("known_miss"):
+                continue
+            hits = kb.search(case["q"])
+            top = hits[0].text.split(";")[0].replace("Record Type: ", "") if hits else None
+            if (top is not None) if case["expect"] is None else (top not in case["expect"]):
+                failures.append(f"{case['q']} -> {top} (expected {case['expect']})")
+        self.assertEqual(failures, [])
+
+
+class MicrophoneSelectionTests(unittest.TestCase):
+    MAC = [(0, "MacBook Pro Microphone")]
+    PI = [(0, "bcm2835 Headphones: - (hw:0,0)"), (1, "Monitor of Built-in Audio"), (2, "USB PnP Sound Device: Audio (hw:2,0)")]
+
+    def test_system_default_is_used_without_asking(self):
+        self.assertEqual(pick_microphone(self.MAC, 0, None), 0)
+
+    def test_without_a_default_a_likely_microphone_is_chosen(self):
+        self.assertEqual(pick_microphone(self.PI, None, None), 2)  # USB mic, not the monitor or headphone jack
+
+    def test_mic_device_by_index_or_name(self):
+        self.assertEqual(pick_microphone(self.PI, 0, "2"), 2)
+        self.assertEqual(pick_microphone(self.PI, 0, "usb"), 2)
+        with self.assertRaises(RuntimeError):
+            pick_microphone(self.PI, 0, "7")
+        with self.assertRaises(RuntimeError):
+            pick_microphone(self.PI, 0, "ReSpeaker")
+
+
+class SpeechFilterTests(unittest.TestCase):
+    def test_repetitive_noise_transcripts_are_dropped(self):
+        self.assertTrue(looks_like_noise("M.D. M.D. M.D. You have to back up. M.D. S.B. S.B. S.B. S.B. S.B. S.B."))
+        self.assertFalse(looks_like_noise("Can you give me what are the medications I am taking daily?"))
+        self.assertFalse(looks_like_noise("no no no no"))  # short answers are kept
+
+    def test_whisper_quality_signals(self):
+        segment = lambda **kw: SimpleNamespace(**{"no_speech_prob": 0.1, "avg_logprob": -0.3, "compression_ratio": 1.2, **kw})  # noqa: E731
+        self.assertTrue(reliable(segment()))
+        self.assertFalse(reliable(segment(no_speech_prob=0.8, avg_logprob=-1.4)))  # probably silence
+        self.assertFalse(reliable(segment(compression_ratio=3.1)))  # degenerate repetition
+
+
+class PromptTests(unittest.TestCase):
+    def test_system_prompt_describes_role_records_and_family(self):
+        kb = KnowledgeBase(load_knowledge())
+        prompt = build_system_prompt(kb.primary_user, kb.currency, "Sam", kb.family)
+        for part in ("personal assistant for John", "insurance policies", "medical and health records",
+                     "identity documents", "(wife Jane, son Robert)", "use only Knowledge and Memory",
+                     "general questions", "identity numbers only when asked"):
+            self.assertIn(part, prompt)
+
+    def test_welcome_names_the_assistant_and_how_to_wake_it(self):
+        welcome = build_welcome("Sam", "John", "hey sam")
+        self.assertEqual(welcome, 'Hello John, I\'m Sam, your private assistant. Say "Hey Sam" to start.')
+        self.assertTrue(build_welcome("Sam", "John", None).endswith("Ask me anything."))
 
 
 class PipelineTests(unittest.TestCase):
@@ -477,11 +552,13 @@ class PipelineTests(unittest.TestCase):
         llm = FakeLLM("Paris.")
         assistant, _, _ = make_assistant(llm=llm)
         self.assertEqual(assistant.respond("what is the capital of France"), "Paris.")
-        self.assertIn("No personal records matched.", llm.calls[0])
+        self.assertIn(f"Knowledge: {NO_RECORDS}", llm.calls[0])
 
-    def test_uncertain_model_answer_falls_back(self):
-        assistant, _, _ = make_assistant(llm=FakeLLM("I do not know."))
-        self.assertEqual(assistant.respond("what is my income"), policy.LOCAL_FALLBACK_ANSWER)
+    def test_uncertain_model_answer_is_spoken_but_not_remembered(self):
+        memory = ConversationMemory(clock=Clock())
+        assistant, _, _ = make_assistant(llm=FakeLLM("I do not know."), memory=memory)
+        self.assertEqual(assistant.respond("what is my income"), "I do not know.")
+        self.assertIsNone(memory.last_turn())
 
     def test_run_survives_errors_and_stops_on_exit(self):
         class BrokenLLM:
@@ -818,21 +895,33 @@ class CommandRecordingTests(unittest.TestCase):
 
 class WakePhraseTests(unittest.TestCase):
     def setUp(self):
-        self.wake = WakePhrase("hey jarvis")
+        self.wake = WakePhrase("hey sam")
 
     def test_request_after_wake_phrase(self):
-        self.assertEqual(self.wake.strip("Hey Jarvis, what's the weather today?"), "What's the weather today?")
-        self.assertEqual(self.wake.strip("Jarvis, what is my EMI"), "What is my EMI")
-        self.assertEqual(self.wake.strip("OK Jarvis."), "")
+        self.assertEqual(self.wake.strip("Hey Sam, what's the weather today?"), "What's the weather today?")
+        self.assertEqual(self.wake.strip("hi sam what is my EMI"), "What is my EMI")  # no pause, request word
+        self.assertEqual(self.wake.strip("OK Sam."), "")
 
     def test_other_speech_is_not_a_request(self):
-        for text in ("I was telling Jarvis fans", "Hey, are you coming to dinner?", "Jarvisville is nice", ""):
-            self.assertIsNone(self.wake.strip(text))
+        for text in (
+            "Sam is coming for dinner tonight.",  # greeting required for "hey sam"
+            "Sam, where did I park?",
+            "Hey, Sam called about the meeting.",  # name not addressed
+            "I saw Sam at the gym yesterday.",
+            "Hey Samantha, hi",
+            "Hey, are you coming to dinner?",
+            "",
+        ):
+            self.assertIsNone(self.wake.strip(text), text)
+
+    def test_phrase_without_greeting_needs_none(self):
+        self.assertEqual(WakePhrase("jarvis").strip("Jarvis, what is my EMI?"), "What is my EMI?")
 
     def test_custom_phrase(self):
         wake = WakePhrase("hey computer")
         self.assertEqual(wake.name, "computer")
-        self.assertEqual(wake.strip("Computer, lights on"), "Lights on")
+        self.assertEqual(wake.strip("Hey computer, lights on"), "Lights on")
+        self.assertIsNone(wake.strip("Computer, lights on"))  # the phrase has a greeting, so one is required
 
     def test_sleep_commands(self):
         self.assertTrue(is_sleep_command("That's all."))
@@ -856,7 +945,7 @@ class ConversationTests(unittest.TestCase):
 
     def test_wake_phrase_then_follow_ups_without_it(self):
         source, capture, _, indicator = conversation(
-            ["Hey Jarvis, what is my EMI?", "And my monthly income?"]
+            ["Hey Sam, what is my EMI?", "And my monthly income?"]
         )
         self.assertEqual(quietly(source.next_utterance)[0], "What is my EMI?")
         self.assertTrue(source.awake)
@@ -865,13 +954,13 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(indicator.states[-2:], [IndicatorState.LISTENING, IndicatorState.THINKING])
 
     def test_bare_wake_phrase_starts_listening(self):
-        source, _, _, _ = conversation(["Hey Jarvis!", "What is my EMI?"])
+        source, _, _, _ = conversation(["Hey Sam!", "What is my EMI?"])
         self.assertEqual(quietly(source.next_utterance)[0], "")
         self.assertTrue(source.awake)
         self.assertEqual(quietly(source.next_utterance)[0], "What is my EMI?")
 
     def test_silence_ends_the_conversation(self):
-        source, _, _, _ = conversation(["Hey Jarvis, what is my EMI?"], seconds=(1, 0))
+        source, _, _, _ = conversation(["Hey Sam, what is my EMI?"], seconds=(1, 0))
         quietly(source.next_utterance)
         result, out = quietly(source.next_utterance)
         self.assertEqual(result, "")
@@ -879,19 +968,19 @@ class ConversationTests(unittest.TestCase):
         self.assertIn("[SLEEP] no follow-up for 30 s", out)
 
     def test_sleep_command_ends_the_conversation(self):
-        source, _, _, _ = conversation(["Hey Jarvis, what is my EMI?", "That's all, thanks."])
+        source, _, _, _ = conversation(["Hey Sam, what is my EMI?", "That's all, thanks."])
         quietly(source.next_utterance)
         source.transcriber.texts = ["That's all, thanks."]
         self.assertEqual(quietly(source.next_utterance)[0], "")
         self.assertFalse(source.awake)
 
     def test_wake_phrase_with_stop_never_exits_the_app(self):
-        source, _, _, _ = conversation(["Hey Jarvis, stop."])
+        source, _, _, _ = conversation(["Hey Sam, stop."])
         self.assertEqual(quietly(source.next_utterance)[0], "")
         self.assertFalse(source.awake)
 
     def test_muting_ends_the_conversation(self):
-        source, _, _, indicator = conversation(["Hey Jarvis, what is my EMI?"])
+        source, _, _, indicator = conversation(["Hey Sam, what is my EMI?"])
         quietly(source.next_utterance)
         source.mute.set_muted(True)
         quietly(source.next_utterance)
@@ -905,7 +994,7 @@ class ConversationTests(unittest.TestCase):
 
     def test_long_request_is_transcribed_in_full_after_waking(self):
         source, _, transcriber, _ = conversation(
-            ["Hey Jarvis, when does", "Hey Jarvis, when does my car insurance expire?"], seconds=(6,)
+            ["Hey Sam, when does", "Hey Sam, when does my car insurance expire?"], seconds=(6,)
         )
         self.assertEqual(quietly(source.next_utterance)[0], "When does my car insurance expire?")
         self.assertEqual(transcriber.lengths, [3.0, 6.0])

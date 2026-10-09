@@ -1,11 +1,27 @@
 """Local speech-to-text with faster-whisper (int8 on CPU)."""
 
+import re
 import sys
 
 import numpy as np
 
 from ..config import STTConfig
 from ..telemetry import timed_event
+
+
+def reliable(segment) -> bool:
+    """Whisper's own quality signals (the thresholds Whisper uses itself): drop a
+    segment that is probably silence it guessed at, or degenerate repetitive text."""
+    if segment.no_speech_prob > 0.6 and segment.avg_logprob < -1.0:
+        return False
+    return segment.compression_ratio <= 2.4
+
+
+def looks_like_noise(text: str) -> bool:
+    """Transcripts like "M.D. M.D. M.D. S.B. S.B. S.B." that Whisper invents from
+    background noise: long but made of very few distinct words."""
+    words = re.findall(r"[a-z0-9']+", text.casefold())
+    return len(words) >= 6 and len(set(words)) / len(words) < 0.4
 
 
 class Transcriber:
@@ -46,7 +62,11 @@ class Transcriber:
                 vad_filter=True,
                 hotwords=self.hotwords,
             )
-            return " ".join(segment.text.strip() for segment in segments).strip()
+            text = " ".join(segment.text.strip() for segment in segments if reliable(segment)).strip()
+        if looks_like_noise(text):
+            print("[STT] unclear audio ignored")
+            return ""
+        return text
 
 
 if __name__ == "__main__":

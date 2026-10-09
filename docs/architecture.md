@@ -85,8 +85,9 @@ stateDiagram-v2
    personal records" without calling the model.
 7. **Reason locally.** `LocalLLM.chat` answers from the system prompt, question,
    owner-labelled records, and any online facts.
-8. **Check.** `require_local_answer` replaces empty or uncertain answers with an honest
-   fallback message.
+8. **Check.** `require_local_answer` replaces an empty answer with an honest
+   fallback message. Uncertain answers ("not recorded…") are spoken in the model's own
+   words but not remembered as facts.
 9. **Speak.** The `Speaker` says the reply; the indicator returns to `IDLE`.
 
 Any exception during steps 4–8 is logged, the user hears an apology, and the loop
@@ -125,13 +126,20 @@ question:
 
 | Stage | What it does | Example |
 |---|---|---|
-| Terms | Drops filler words, adds synonyms from `SYNONYMS` | "EMI" → emi, installment, loan |
-| Match | Porter-stemmed full-text search, BM25-ranked | "loans" finds "Home Loan" |
+| Terms | Drops filler words (incl. everyday verbs, adverbs, pronouns: *taking, daily, now, under…*) and adds synonyms from `SYNONYMS` | "EMI" → emi, installment, loan; "medications" → prescription, dosage |
+| Match | Porter-stemmed full-text search, BM25-ranked, over each record's fields (`body`) and its category (`topic`) | "loans" finds "Home Loan"; "my medical records" finds all medical records |
 | Owner filter | "my"/"I" means the primary user (most frequent owner, or `PRIMARY_USER`); other people only when named (relation or name); "family" covers everyone; shared "family" records are always included | "my income" never returns the wife's salary |
-| Type focus | If a word names a record type, keep only that type | "passport" → passport record only |
-| Attribute check | If the question asks for an attribute (expiry, earnings, EMI…) that none of the selected records contain, return nothing | "when does my passport expire" → "not in your records", not a guessed date |
+| Coverage | A record is kept only if **it alone** covers every meaningful question word (the word or a synonym). Named things (companies, banks, models, places, and their acronyms) may be covered by any matching record, so they can point at another record | "when does my passport expire" → nothing (no record has both); "where did I work before Infosys" → the TCS job |
+| Category collisions | A word sharing its stem with a category name ("medications" / "medical" → `medic`) is matched through its synonyms only | "my medications" → the prescription, not every medical record |
+| Acronyms | Names of three or more capitalised words are also indexed by their initials | "SBI" → State Bank of India bond; "TCS" → Tata Consultancy Services |
+| Ranking | Records containing a named thing from the question first, then current before "previous …" records (unless the question says before/previous/earlier), then BM25 | "which insurer covers my Hero Splendor" → that bike; "where do I work" → current job |
 | Top-k | Keep at most `KNOWLEDGE_TOP_K` records (default 4) | Short prompts on the Pi |
 | Format | One line per record, labelled with category and owner, plus a note mapping synonyms | "Financial record of John's wife: …" |
+
+`tests/data/knowledge_retrieval_eval.json` holds 81 natural spoken questions (including
+real phrasings like "what are the medications I am taking daily?"), each with the record
+type it must find or `null` if it must find nothing; a unit test requires all of them
+except one documented limitation (see docs/benchmarks.md).
 
 The system prompt names the primary user, tells the model to address them as "you",
 states the currency (`CURRENCY`, default INR), and includes a one-line example answer,
@@ -204,7 +212,7 @@ used for requests, and `brain/wake.py` checks the text.
 stateDiagram-v2
     [*] --> Asleep
     Asleep --> Asleep: speech without wake phrase (discarded)
-    Asleep --> Awake: "Hey Jarvis[, request]"
+    Asleep --> Awake: "Hey Sam[, request]"
     Awake --> Awake: request (no wake phrase needed)
     Awake --> Asleep: CONVERSATION_TIMEOUT of silence
     Awake --> Asleep: "that's all" / "stop listening" / "thank you"
@@ -213,7 +221,7 @@ stateDiagram-v2
 
 | Rule | Detail |
 |---|---|
-| Match | The transcript must **start** with the wake phrase; greetings are interchangeable ("Jarvis", "Hi Jarvis"). "I told Jarvis…" does not wake it |
+| Match | The transcript must **start** with a greeting and the name ("Hey Sam", "Hi Sam", "OK Sam"), and the name must be addressed: followed by a pause or a request word ("Hey Sam what's…"). "Sam is coming for dinner", "Hey, Sam called…" and "I saw Sam…" do not wake it |
 | Cost while asleep | Only the first `WAKE_CHECK_SECONDS` (3 s) of each utterance are transcribed; the full utterance is transcribed only after a match |
 | Accuracy | Whisper is given `hotwords` (wake name, EMI, PAN, Aadhaar, default place), which fixed "EMI" being heard as "UI" with `tiny.en` and caused no false wakes on silence, noise, or unrelated speech in testing |
 | Privacy | Ignored speech is transcribed in memory and discarded; its text is never printed, logged, or stored |
@@ -287,7 +295,7 @@ models, only configuration changes are needed (see [configuration.md](configurat
 | Share prices use Yahoo Finance's unofficial, undocumented endpoint, which may change or rate-limit | Provider is swappable in `online_gateway.py`; cached results and an honest "couldn't get live prices" fallback to saved records |
 | News is read out as verbatim headlines, not summarised (the 0.6B model could distort them) | A larger model could summarise |
 | The 0.6B model's one-line weather advice can misjudge probabilities (e.g. "likely to rain" at 14%) | The facts are always read out verbatim first; a larger model or rule-based advice |
-| Fallback check flags any answer containing "can't" | Fall back on signals (empty retrieval, out-of-scope intent) instead of keywords |
+| The 0.6B model sometimes refuses with the right record in context ("what are the medications I am taking daily?" → "not recorded"); Qwen3-1.7B answers it | Larger model on the Pi, if its speed is acceptable (see docs/benchmarks.md) |
 | Memory can't reject near-misses ("wife's birthday" vs mom's) | They are answered with a hedge and the note quoted verbatim |
 | Some paraphrases fall just below the similarity threshold ("power tool" → drill scores 0.31 with the int8 model) | Lower `MEMORY_MIN_SIMILARITY`, at the cost of more hedged near-misses; or a larger embedding model |
 | Router is keyword-based | Grammar-constrained LLM intent output |

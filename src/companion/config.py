@@ -95,7 +95,7 @@ class STTConfig:
 
 @dataclass(frozen=True)
 class CaptureConfig:
-    device: int | None
+    device: str | None  # index or part of the name; None = automatic
     sample_rate: int
     max_record_seconds: float
     max_wait_for_speech_seconds: float
@@ -106,7 +106,7 @@ class CaptureConfig:
     def from_env(cls) -> "CaptureConfig":
         device = os.getenv("MIC_DEVICE")
         return cls(
-            device=int(device) if device else None,
+            device=device or None,
             sample_rate=16_000,
             max_record_seconds=_env_float("MAX_RECORD_SECONDS", 15),
             max_wait_for_speech_seconds=_env_float("MAX_WAIT_FOR_SPEECH_SECONDS", 30),
@@ -126,7 +126,7 @@ class WakeWordConfig:
         return cls(
             enabled=_env_bool("WAKE_WORD", True),
             # Detected in Whisper transcripts; any phrase Whisper spells reliably.
-            phrase=os.getenv("WAKE_PHRASE", "hey jarvis"),
+            phrase=os.getenv("WAKE_PHRASE", "hey sam"),
             # After waking, follow-ups need no wake phrase until this much silence.
             conversation_timeout=_env_float("CONVERSATION_TIMEOUT", 30),
         )

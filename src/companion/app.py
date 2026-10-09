@@ -7,6 +7,7 @@ from .brain.knowledge import KnowledgeBase, load_knowledge
 from .brain.llm import LocalLLM
 from .brain.market import Portfolio
 from .brain.memory import ConversationMemory
+from .brain.prompts import build_welcome
 from .brain.wake import WakePhrase
 from .config import IS_RASPBERRY_PI, AppConfig
 from .device.indicator import ConsoleIndicator
@@ -91,6 +92,7 @@ def main(argv: list[str] | None = None) -> None:
     print(f"Online lookups: {', '.join(sorted(gateway.kinds)) or 'off'}")
     assistant = Assistant(
         llm=llm,
+        name=WakePhrase(config.wake_word.phrase).name.title(),  # "hey sam" -> "Sam"
         knowledge=knowledge,
         gateway=gateway,
         portfolio=Portfolio.load(records, knowledge.primary_user, config.market_symbols_file),
@@ -118,4 +120,5 @@ def main(argv: list[str] | None = None) -> None:
     where = config.memory.path or "RAM only (MEMORY=0)"
     print(f"Memory: {where}, kept {config.memory.retention_days} days")
     print(f"Ready in {startup_ms / 1000:.1f}s. {hint}")
-    assistant.run(source)
+    wake = getattr(source, "wake", None)
+    assistant.run(source, welcome=build_welcome(assistant.name, knowledge.primary_user, wake.phrase if wake else None))

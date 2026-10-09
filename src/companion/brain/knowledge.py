@@ -29,6 +29,11 @@ KNOWLEDGE_FILE = KNOWLEDGE_DIR / "personal_data.json"
 CATEGORIES = ("financial", "medical", "documents", "history")
 SHARED_OWNER_WORDS = frozenset({"family", "household"})
 # Category names are too broad to narrow results to one record type.
+# Fields whose values name things (see KnowledgeBase._entities).
+ENTITY_FIELDS = frozenset({"name", "company", "employer", "issuer", "bank", "scheme", "provider", "model", "location"})
+# Without these, a question is about the present: "where do I work" means the
+# current job, so records of a "previous ..." type rank last.
+PAST_WORDS = frozenset({"before", "previous", "previously", "earlier", "past", "former", "used", "old"})
 CATEGORY_WORDS = frozenset({"financial", "finance", "medical", "document", "documents", "history"})
 PERSONAL_WORDS = frozenset({"i", "me", "my", "mine", "myself", "our", "we"})
 STOPWORDS = frozenset(
@@ -38,28 +43,55 @@ STOPWORDS = frozenset(
     or our please record records show tell the their there this to us was we
     what when where which who whom why will with you your much many latest
     detail details know get got not no
+    am been being take takes taking took daily every each last now currently
+    say said says written put hold holding own owned owns go goes went make made
+    keep kept use used using long normal level like right still just also ever
+    into under over onto per than then her his him she he they them pay
     """.split()
 )
 # Everyday words mapped to the vocabulary used in the records, so "earn"
 # finds income and "EMI" finds the loan installment. Stemming covers plurals.
 SYNONYMS = {
     "earn": "income salary", "earning": "income salary", "salary": "income",
-    "pay": "income salary", "paid": "income salary",
+    "paid": "income salary",
     "spend": "expense", "spending": "expense",
     "emi": "installment loan", "mortgage": "home loan",
     "invest": "investment mutual fund stock bond", "investment": "mutual fund stock bond",
     "expire": "expiry renewal valid maturity", "expiry": "renewal valid maturity",
     "renew": "renewal", "due": "renewal maturity",
     "work": "organization employer role", "job": "organization employer role",
-    "company": "organization employer", "employer": "organization",
+    "employer": "organization",
     "before": "previous", "previously": "previous", "earlier": "previous",
     "car": "four wheeler vehicle", "bike": "two wheeler vehicle", "scooter": "two wheeler vehicle",
-    "bp": "blood pressure", "medicine": "medication prescription", "tablet": "medication prescription",
+    "bp": "blood pressure", "medicine": "prescription dosage", "tablet": "medication prescription",
     "study": "school college qualification", "studied": "school college qualification",
     "education": "school college qualification",
     "id": "identification document", "identity": "identification document",
     "finish": "years period", "finished": "years period", "graduate": "years college qualification",
     "graduated": "years college qualification", "join": "period years", "joined": "period years",
+    # Spoken paraphrases of record fields, found with the retrieval benchmark
+    # (tests/data/knowledge_retrieval_eval.json).
+    "medication": "prescription dosage", "medicines": "prescription dosage",
+    "pill": "prescription medication dosage", "drug": "prescription medication dosage",
+    "weigh": "weight kg", "heavy": "weight kg", "tall": "height cm",
+    "oxygen": "oxygen saturation", "pulse": "pulse per minute", "heart": "pulse per minute",
+    "test": "report medical", "checkup": "medical history report review", "health": "medical history review",
+    "rent": "housing expense", "groceries": "food expense", "month": "monthly",
+    "left": "remaining", "remaining": "remaining tenure",
+    "validity": "valid from to renewal expiry", "valid": "valid from to renewal expiry",
+    "period": "valid from to renewal expiry period", "end": "valid to expiry renewal maturity",
+    "ends": "valid to expiry renewal maturity",
+    "cover": "coverage amount insurance", "covers": "coverage amount insurance",
+    "insure": "insurance coverage provider", "insures": "insurance coverage provider",
+    "insured": "insurance coverage amount", "policy": "policy insurance",
+    "share": "stock quantity", "shares": "stock quantity", "licence": "license",
+    "title": "role", "designation": "role", "position": "role", "office": "organization",
+    "prescribed": "prescription", "prescribe": "prescription", "qualify": "qualification",
+    "qualified": "qualification", "till": "valid to expiry", "until": "valid to expiry",
+    "active": "valid from to", "assured": "coverage amount", "sum": "coverage amount",
+    "drive": "vehicle", "driving": "vehicle license", "insurer": "insurance provider",
+    "company": "organization employer provider", "complete": "years period", "completed": "years period",
+    "rate": "rate minute percent",
 }
 
 Records = dict[str, list[dict[str, Any]]]
@@ -113,6 +145,18 @@ def synonyms_for(word: str) -> list[str]:
     return found.split() if found else []
 
 
+def _acronyms(entry: dict[str, Any]) -> list[str]:
+    """Initials of names of three or more capitalised words, so "SBI" finds
+    "State Bank of India" and "TCS" finds "Tata Consultancy Services"."""
+    found = []
+    for value in entry.values():
+        if isinstance(value, str):
+            capitals = [w for w in re.findall(r"[A-Za-z]+", value) if w[0].isupper() and w.lower() not in ("of", "and", "the")]
+            if len(capitals) >= 3 and len(capitals) == len([w for w in re.findall(r"[A-Za-z]+", value) if w.lower() not in ("of", "and", "the")]):
+                found.append("".join(w[0] for w in capitals))
+    return found
+
+
 def tokenize(text: str) -> list[str]:
     """Lower-case word tokens with possessive 's removed ("wife's" -> "wife")."""
     return [re.sub(r"'s$", "", word) for word in re.findall(r"[a-z0-9]+(?:'s)?", text.casefold())]
@@ -137,7 +181,30 @@ class KnowledgeBase:
         owners.pop("", None)
         self.primary_user = primary_user or (owners.most_common(1)[0][0] if owners else "the user")
         self._aliases = self._owner_aliases(records, owners)
+        # "wife Jane", "son Robert": named family members, for the system prompt.
+        self.family = [
+            f"{str(entry['relationship']).casefold()} {entry['name']}"
+            for entries in records.values()
+            for entry in entries
+            if isinstance(entry, dict) and entry.get("name") and entry.get("relationship")
+            and entry.get("owner") != self.primary_user
+        ]
         self._db = self._build_index(records)
+        # Words naming things (companies, banks, models, places) and their acronyms. In a
+        # question they may point at another record ("where did I work before Infosys?"),
+        # so they don't have to appear in the answer record itself.
+        self._entities = {
+            word
+            for entries in records.values()
+            for entry in entries
+            if isinstance(entry, dict)
+            for key, value in entry.items()
+            if isinstance(value, str) and key in ENTITY_FIELDS
+            for word in tokenize(value) + [a.casefold() for a in _acronyms({key: value})]
+        }
+        # ... but not common nouns that are also record types ("college", "bank", "fund").
+        kind_words = {w for (kind,) in self._db.execute("SELECT kind FROM records") for w in tokenize(kind)}
+        self._entities -= kind_words | STOPWORDS
 
     def _owner_aliases(self, records: Records, owners: Counter) -> dict[str, set[str]]:
         """Words that refer to each non-primary owner: "John's wife" -> {wife, jane}."""
@@ -159,7 +226,7 @@ class KnowledgeBase:
         try:
             db.execute(
                 "CREATE VIRTUAL TABLE records USING fts5("
-                "category UNINDEXED, owner UNINDEXED, text UNINDEXED, kind, body, "
+                "category UNINDEXED, owner UNINDEXED, text UNINDEXED, kind, topic, body, "
                 "tokenize='porter unicode61')"
             )
         except sqlite3.OperationalError as exc:
@@ -171,9 +238,13 @@ class KnowledgeBase:
                     continue
                 text = _format_record(entry)
                 kind = str(entry.get("record_type") or "").replace("_", " ")
+                acronyms = " ".join(_acronyms(entry))
                 db.execute(
-                    "INSERT INTO records (category, owner, text, kind, body) VALUES (?, ?, ?, ?, ?)",
-                    (category, str(entry.get("owner") or self.primary_user), text, kind, f"{category} {text}"),
+                    # The category is its own column: it helps find records ("my medical
+                    # records") but must not satisfy a question word by itself, or
+                    # "medications" (stem "medic") would match every medical record.
+                    "INSERT INTO records (category, owner, text, kind, topic, body) VALUES (?, ?, ?, ?, ?, ?)",
+                    (category, str(entry.get("owner") or self.primary_user), text, kind, category, f"{text} {acronyms}"),
                 )
         return db
 
@@ -212,34 +283,46 @@ class KnowledgeBase:
             row
             for row in self._db.execute(
                 "SELECT rowid, category, owner, text FROM records WHERE records MATCH ? ORDER BY rank",
-                (f"body : ({query})",),
+                (f"{{body topic}} : ({query})",),
             )
             if row[2] in allowed
         ]
 
-        focus_terms = [term for term in terms if term not in CATEGORY_WORDS]
-        if focus_terms:
-            focus_query = " OR ".join(f'"{term}"' for term in focus_terms)
-            same_kind = {
-                rowid
-                for (rowid,) in self._db.execute(
-                    "SELECT rowid FROM records WHERE records MATCH ?", (f"kind : ({focus_query})",)
+        # A record is relevant only if it covers every meaningful word of the question by
+        # itself (the word or a synonym). Words spread over several records mean the
+        # answer isn't recorded: "when does my passport expire" must not combine the
+        # passport record with an insurance "valid to" date. Ranking: records of a
+        # "previous ..." type last unless the question asks about the past, then BM25.
+        concepts = self._concepts(question)
+        names_found: dict[int, int] = {}
+        if concepts and hits:
+            rowids = [row[0] for row in hits]
+            required, named = [], []
+            for word, concept in concepts:
+                (named if word in self._entities else required).append(concept)
+            names_found = self._concepts_covered(named, rowids)
+            if all(self._any_covers(concept, rowids) for concept in named):
+                covered = self._concepts_covered(required, rowids)
+                hits = [row for row in hits if covered[row[0]] == len(required)]
+            else:
+                hits = []
+        if hits:
+            past = bool(set(tokenize(question)) & PAST_WORDS)
+            kinds = dict(self._db.execute("SELECT rowid, kind FROM records").fetchall())
+            order = {row[0]: i for i, row in enumerate(hits)}
+            # Records containing a named thing from the question come first ("my Hero
+            # Splendor", "at TCS"), then current before previous, then BM25.
+            hits.sort(
+                key=lambda row: (
+                    -names_found.get(row[0], 0),
+                    not past and kinds[row[0]].startswith("previous"),
+                    order[row[0]],
                 )
-            }
-            focused = [row for row in hits if row[0] in same_kind]
-            if focused:
-                hits = focused
-
-        if hits and not self._covers_asked_attributes(question, [row[0] for row in hits]):
-            # e.g. "when does my passport expire" when the passport record has no
-            # expiry: return nothing so the assistant says so instead of guessing.
-            return []
+            )
         return [Match(*row[1:]) for row in hits[: self.top_k]]
 
-    def _covers_asked_attributes(self, question: str, rowids: list[int]) -> bool:
-        """True if every meaningful word of the question (or a synonym) appears in
-        at least one selected record: "where is my car key" must not be answered
-        from a car record that never mentions a key."""
+    def _concepts(self, question: str) -> list[tuple[str, str]]:
+        """(word, FTS query) per meaningful question word; the query matches the word or a synonym."""
         owner_words = {word for alias in self._aliases.values() for word in alias}
         words = [
             word
@@ -247,16 +330,31 @@ class KnowledgeBase:
             if word not in STOPWORDS and word not in CATEGORY_WORDS and word not in owner_words
             and word not in PERSONAL_WORDS and word not in tokenize(self.primary_user)
         ]
+        def terms(word: str) -> list[str]:
+            # A word whose stem collides with a category name ("medications" and "medical"
+            # both stem to "medic") is matched through its synonyms only, or it would
+            # match every record of that category.
+            synonyms = synonyms_for(word)
+            collides = any(word[:5] == category[:5] for category in CATEGORY_WORDS) and word not in CATEGORY_WORDS
+            return synonyms if synonyms and collides else [word, *synonyms]
+
+        return [(w, "body : (" + " OR ".join(f'"{t}"' for t in terms(w)) + ")") for w in words]
+
+    def _any_covers(self, concept: str, rowids: list[int]) -> bool:
         placeholders = ",".join("?" * len(rowids))
-        for word in words:
-            concept = " OR ".join(f'"{term}"' for term in [word, *synonyms_for(word)])
-            found = self._db.execute(
-                f"SELECT 1 FROM records WHERE records MATCH ? AND rowid IN ({placeholders}) LIMIT 1",
-                (f"body : ({concept})", *rowids),
-            ).fetchone()
-            if not found:
-                return False
-        return True
+        return bool(self._db.execute(
+            f"SELECT 1 FROM records WHERE records MATCH ? AND rowid IN ({placeholders}) LIMIT 1", (concept, *rowids)
+        ).fetchone())
+
+    def _concepts_covered(self, concepts: list[str], rowids: list[int]) -> dict[int, int]:
+        counts = dict.fromkeys(rowids, 0)
+        placeholders = ",".join("?" * len(rowids))
+        for concept in concepts:
+            for (rowid,) in self._db.execute(
+                f"SELECT rowid FROM records WHERE records MATCH ? AND rowid IN ({placeholders})", (concept, *rowids)
+            ):
+                counts[rowid] += 1
+        return counts
 
     def context_for(self, question: str) -> str:
         """Readable, owner-labelled records for the prompt, or "" when none match."""

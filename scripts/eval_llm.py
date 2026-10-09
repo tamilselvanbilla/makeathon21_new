@@ -60,7 +60,7 @@ def render(case: dict, knowledge, records: dict) -> tuple[str, str]:
     from companion.brain.knowledge import _format_record
     from companion.brain.prompts import build_advice_prompt, build_system_prompt, build_user_prompt
 
-    system = build_system_prompt(knowledge.primary_user, knowledge.currency)
+    system = build_system_prompt(knowledge.primary_user, knowledge.currency, "Sam", knowledge.family)
     if case.get("online_facts"):
         return system, build_advice_prompt(case["q"], case["online_facts"], "")
     if case.get("context") == "app":

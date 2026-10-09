@@ -58,9 +58,22 @@ def strip_thinking(response: str) -> str:
     return re.sub(r"(?s)<think>.*", " ", response)
 
 
+POSSESSIVES = {"my": "your", "mine": "yours", "myself": "yourself"}
+
+
+def speak_to_user(text: str) -> str:
+    """Small models echo the question's "my" ("the validity of my insurance"). The
+    assistant owns nothing, so in its replies "my" always means the user's."""
+    def swap(match: re.Match) -> str:
+        word = POSSESSIVES[match.group(0).casefold()]
+        return word.capitalize() if match.group(0)[0].isupper() else word
+
+    return re.sub(r"\b(?:my|mine|myself)\b", swap, text, flags=re.IGNORECASE)
+
+
 def clean_model_response(response: str) -> str:
     """Remove thinking traces, labels, serialized records, and duplicate sentences."""
-    cleaned = strip_thinking(response)
+    cleaned = speak_to_user(strip_thinking(response))
     cleaned = re.sub(
         r"(?is)\s*(?:\[(?:financial|medical|documents|history)\]\s*)?\{[^{}]*\}",
         " ",

@@ -7,7 +7,7 @@ and tuning without editing code. Set them per run:
 WHISPER_MODEL_SIZE=base.en LLM_MAX_TOKENS=96 scripts/run.sh
 ```
 
-or persistently in `~/.bashrc` (`export MIC_DEVICE=1`).
+or persistently in `~/.bashrc` (`export MIC_DEVICE=USB`).
 
 Defaults marked **Pi / other** differ by platform. A Raspberry Pi is detected from
 `/proc/device-tree/model`. "Cores" means the number of CPU cores (4 on a Pi 4).
@@ -38,7 +38,7 @@ Defaults marked **Pi / other** differ by platform. A Raspberry Pi is detected fr
 
 | Variable | Default | Description |
 |---|---|---|
-| `MIC_DEVICE` | *(prompt, or system default when headless)* | Input device index from `scripts/run.sh --list-mics` |
+| `MIC_DEVICE` | *(automatic)* | Index or part of the name of the input device (`scripts/run.sh --list-mics`). Unset: the system default input, else the first USB/ReSpeaker/"mic" device that isn't a loopback or monitor |
 | `SPEECH_RMS_THRESHOLD` | `450` | Loudness that counts as speech (int16 RMS). Lower for quiet mics, higher for noisy rooms |
 | `SILENCE_SECONDS` | `0.8` | Silence that ends an utterance |
 | `MAX_RECORD_SECONDS` | `15` | Hard cap on one utterance |
@@ -106,12 +106,15 @@ downloaded and there is no extra licence (Whisper and faster-whisper are MIT).
 | Variable | Default | Description |
 |---|---|---|
 | `WAKE_WORD` | `1` | `0` treats any speech as a request (same as `--no-wake-word`) |
-| `WAKE_PHRASE` | `hey jarvis` | Any phrase. The greeting is flexible: with `hey jarvis`, "Jarvis", "Hi Jarvis" and "OK Jarvis" also work |
+| `WAKE_PHRASE` | `hey sam` | Any phrase. With a greeting in the phrase, any greeting works ("Hey Sam", "Hi Sam", "OK Sam") but one is required; a phrase without one (`jarvis`) is accepted on its own |
 | `CONVERSATION_TIMEOUT` | `30` | Seconds of silence after a reply before it needs the wake phrase again |
 | `WHISPER_HOTWORDS` | `EMI PAN Aadhaar` | Words Whisper should favour. The wake name and `DEFAULT_PLACE` are added automatically |
 
 **Choosing a wake phrase:** use a name Whisper spells consistently, i.e. real words
-or common names ("hey computer", "hey jarvis", "hello friday"). Invented names get
+or common names ("hey sam", "hey computer", "hello friday"). With a common name like
+Sam, keep the greeting in the phrase: then "Sam is coming for dinner" or "Hey, Sam
+called" don't wake the device, because the name must be greeted and addressed (followed
+by a pause or a request such as "what…", "remind…"). Invented names get
 spelled differently each time and won't match. Check yours with
 `scripts/run.sh --mic-test`, then
 `cd src && ../.venv/bin/python -m companion.audio.stt ../audio/test.wav`.

@@ -17,7 +17,7 @@ from .brain.memory import (
     parse_memory_command,
     second_person,
 )
-from .brain.policy import LOCAL_FALLBACK_ANSWER, require_local_answer, should_fallback
+from .brain.policy import is_uncertain, require_local_answer
 from .brain.news import headlines_reply, is_news_question, news_request
 from .brain.prompts import NOT_IN_RECORDS_ANSWER, build_advice_prompt, build_system_prompt, build_user_prompt
 from .brain.router import Intent, extract_place, parse_lookup, route
@@ -68,7 +68,7 @@ class MicInput:
 
     With a wake phrase, the device has two states:
     - asleep (IDLE): speech is transcribed and kept only if it starts with the
-      wake phrase ("Hey Jarvis, what's my EMI?"); everything else is discarded.
+      wake phrase ("Hey Sam, what's my EMI?"); everything else is discarded.
     - awake (LISTENING): a conversation. Follow-up requests need no wake phrase.
       It goes back to sleep after `conversation_timeout` seconds without speech,
       on a sleep command ("that's all", "stop listening"), or when muted.
@@ -164,13 +164,15 @@ class Assistant:
         default_place: str = "Bengaluru",
         memory: ConversationMemory | None = None,
         portfolio: Portfolio | None = None,
+        name: str = "Sam",
     ):
+        self.name = name
         self.portfolio = portfolio
         self.default_place = default_place
         self.memory = memory or ConversationMemory()
         self.llm = llm
         self.knowledge = knowledge
-        self.system_prompt = build_system_prompt(knowledge.primary_user, knowledge.currency)
+        self.system_prompt = build_system_prompt(knowledge.primary_user, knowledge.currency, name, knowledge.family)
         self.gateway = gateway
         self.indicator = indicator
         self.speaker = speaker
@@ -213,7 +215,7 @@ class Assistant:
         answer = require_local_answer(
             self.llm.chat(self.system_prompt, build_user_prompt(text, knowledge, remembered, earlier))
         )
-        return answer, answer != LOCAL_FALLBACK_ANSWER
+        return answer, not is_uncertain(answer)
 
     def _is_market_question(self, text: str) -> bool:
         # With market lookups switched off, these questions are answered from the records.
@@ -291,9 +293,12 @@ class Assistant:
         knowledge = self.knowledge.context_for(text)
         advice = self.llm.chat(self.system_prompt, build_advice_prompt(text, result.text, knowledge))
         reply = f"From {result.source}, online: {result.text}"
-        return (reply if should_fallback(advice) else f"{reply} {advice}"), True
+        return (reply if is_uncertain(advice) else f"{reply} {advice}"), True
 
-    def run(self, source: InputSource) -> None:
+    def run(self, source: InputSource, welcome: str | None = None) -> None:
+        if welcome:
+            self.indicator.show(IndicatorState.SPEAKING)
+            self.speaker.say(welcome)
         self.indicator.show(IndicatorState.IDLE)
         while True:
             text = source.next_utterance()
