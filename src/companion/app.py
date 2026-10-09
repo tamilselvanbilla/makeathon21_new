@@ -77,6 +77,7 @@ def main(argv: list[str] | None = None) -> None:
     assistant = Assistant(
         llm=llm,
         name=config.assistant_name,
+        debug_context=config.debug_context,
         knowledge=knowledge,
         gateway=gateway,
         portfolio=Portfolio.load(records, knowledge.primary_user, config.market_symbols_file),

@@ -74,6 +74,7 @@ the device's native rate and resampled.
 | `ONLINE_MARKET` | `1` | `0` switches off share prices and fund NAVs; portfolio questions are then answered from the saved records |
 | `ONLINE_NEWS` | `1` | `0` switches off news headlines |
 | `ASSISTANT_NAME` | `Sam` | The assistant's name in the welcome message |
+| `CONTEXT_DEBUG` | `0` | `1` prints, for each question, the records and memory sent to the model, to check what it was given |
 | `DEFAULT_PLACE` | `Bengaluru` | Place used for weather questions that don't name one ("will it rain today?") |
 | `MARKET_SYMBOLS_FILE` | `knowledge_base/market_symbols.json` | Company and index names the assistant may look up, mapped to symbols |
 

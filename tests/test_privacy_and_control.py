@@ -541,6 +541,13 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(assistant.respond("what is the capital of France"), "Paris.")
         self.assertIn(f"Knowledge: {NO_RECORDS}", llm.calls[0])
 
+    def test_context_debug_prints_what_the_model_receives(self):
+        assistant, _, _ = make_assistant()
+        assistant.debug_context = True
+        _, out = quietly(assistant.respond, "what is my monthly income")
+        self.assertIn("[CONTEXT] records sent to the model:", out)
+        self.assertIn("Monthly Income: 85000", out)
+
     def test_uncertain_model_answer_is_spoken_but_not_remembered(self):
         memory = ConversationMemory(clock=Clock())
         assistant, _, _ = make_assistant(llm=FakeLLM("I do not know."), memory=memory)

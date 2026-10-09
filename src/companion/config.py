@@ -178,6 +178,7 @@ class AppConfig:
     market_symbols_file: Path
     default_place: str
     assistant_name: str
+    debug_context: bool
     tts_enabled: bool
 
     @classmethod
@@ -202,5 +203,7 @@ class AppConfig:
             default_place=os.getenv("DEFAULT_PLACE", "Bengaluru"),
             # Used in the welcome message.
             assistant_name=os.getenv("ASSISTANT_NAME", "Sam"),
+            # Print the records and memory sent to the model with each question.
+            debug_context=_env_bool("CONTEXT_DEBUG", False),
             tts_enabled=_env_bool("TTS_ENABLED", True),
         )

@@ -105,8 +105,10 @@ class Assistant:
         memory: ConversationMemory | None = None,
         portfolio: Portfolio | None = None,
         name: str = "Sam",
+        debug_context: bool = False,
     ):
         self.name = name
+        self.debug_context = debug_context
         self.portfolio = portfolio
         self.default_place = default_place
         self.memory = memory or ConversationMemory()
@@ -152,6 +154,10 @@ class Assistant:
             # Nothing on record or in memory: answer honestly instead of guessing.
             return NOT_IN_RECORDS_ANSWER, False
         earlier = f"{previous.question} You answered: {previous.answer}" if previous else ""
+        if self.debug_context:
+            print("[CONTEXT] records sent to the model:\n  " + (knowledge.replace("\n", "\n  ") or "(none)"))
+            if remembered:
+                print("[CONTEXT] memory sent to the model:\n  " + remembered.replace("\n", "\n  "))
         answer = require_local_answer(
             self.llm.chat(self.system_prompt, build_user_prompt(text, knowledge, remembered, earlier))
         )
