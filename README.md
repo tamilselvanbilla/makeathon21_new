@@ -168,6 +168,7 @@ Points 2 and 3 are enforced by tests in `tests/test_privacy_and_control.py`.
 | [docs/setup.md](docs/setup.md) | Install on a Pi or laptop, step by step, and fix problems |
 | [docs/configuration.md](docs/configuration.md) | Tune models, microphone sensitivity, or performance |
 | [docs/architecture.md](docs/architecture.md) | Understand the pipeline or add a feature |
+| [docs/benchmarks.md](docs/benchmarks.md) | See how the language and memory models were chosen, and re-run the benchmarks on the Pi |
 
 ## Roadmap
 
