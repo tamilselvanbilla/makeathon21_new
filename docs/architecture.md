@@ -61,9 +61,10 @@ stateDiagram-v2
 1. **Mute check.** `MicInput` asks the `MuteSwitch`. If muted, the indicator shows
    `MUTED` and the microphone is never opened.
 2. **Capture.** The microphone stays open between utterances (closed only when muted), so
-   speech that starts while the previous utterance is being transcribed is not lost. PortAudio's
-   audio thread queues each block (with `latency="high"`), so slow moments delay processing
-   instead of overflowing the device buffer; audio heard while the assistant speaks is discarded.
+   speech that starts while the previous utterance is being transcribed is not lost. On Linux the
+   audio comes from ALSA's `arecord` in a separate process (1 s buffer, `plughw` converts the mic to
+   16 kHz), so a busy Python can't make the sound card overrun; elsewhere PortAudio's audio thread
+   queues each block with a 0.5 s buffer. Audio heard while the assistant speaks is discarded.
    `MicrophoneCapture.frames` streams 80 ms frames of 16 kHz audio
    (resampled if the mic can't do 16 kHz). `record_command` keeps audio once loudness
    passes `SPEECH_RMS_THRESHOLD` and stops after `SILENCE_SECONDS` of quiet. If the

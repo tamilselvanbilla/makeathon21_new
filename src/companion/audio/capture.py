@@ -7,6 +7,10 @@ without hardware.
 
 import queue
 import re
+import shutil
+import subprocess
+import sys
+import threading
 from contextlib import closing
 from typing import Callable, Iterable, Iterator
 
@@ -57,6 +61,75 @@ def record_command(
         return np.empty(0, dtype=np.float32)  # stream ended: muted mid-recording
 
     return np.concatenate(chunks).astype(np.float32) / 32768.0
+
+
+# PortAudio names ALSA devices like "USB PnP Sound Device: Audio (hw:2,0)".
+ALSA_HW = re.compile(r"\(hw:(\d+),(\d+)\)")
+
+
+def alsa_device_for(name: str) -> str | None:
+    """The ALSA `plughw` device for a PortAudio device name, or None. `plughw`
+    converts any microphone's native rate and format to 16 kHz mono in ALSA."""
+    match = ALSA_HW.search(name)
+    return f"plughw:{match.group(1)},{match.group(2)}" if match else None
+
+
+class ArecordStream:
+    """Records with ALSA's `arecord` in a separate process.
+
+    On a Raspberry Pi, PortAudio's audio thread has to call back into Python for
+    every block, and while Whisper or the LLM keep Python busy the callback can run
+    too late for the sound card's buffer, so ALSA overruns and audio is lost.
+    `arecord` is C code in its own process with a 1-second buffer; this class only
+    reads finished 80 ms blocks from its output. Overruns it reports are counted.
+    """
+
+    def __init__(self, device: str, on_block: Callable[[np.ndarray], None], on_overrun: Callable[[], None],
+                 popen: Callable[..., subprocess.Popen] = subprocess.Popen):
+        self.device = device
+        self._on_block = on_block
+        self._on_overrun = on_overrun
+        self._popen = popen
+        self._process = None
+
+    def start(self) -> None:
+        self._process = self._popen(
+            # No -q: quiet mode may hide the "overrun!!!" messages counted below.
+            ["arecord", "-D", self.device, "-f", "S16_LE", "-c", "1", "-r", str(TARGET_RATE), "-t", "raw",
+             "--buffer-time=1000000", "--period-time=80000"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0,
+        )
+        threading.Thread(target=self._read_audio, daemon=True).start()
+        threading.Thread(target=self._read_errors, daemon=True).start()
+
+    def _read_audio(self) -> None:
+        size = FRAME_SAMPLES * 2  # int16
+        stdout = self._process.stdout
+        buffer = b""
+        while True:
+            chunk = stdout.read(size - len(buffer))
+            if not chunk:
+                return  # arecord stopped
+            buffer += chunk
+            if len(buffer) == size:
+                self._on_block(np.frombuffer(buffer, dtype=np.int16).copy())
+                buffer = b""
+
+    def _read_errors(self) -> None:
+        for line in self._process.stderr:
+            if b"overrun" in line:
+                self._on_overrun()
+
+    def stop(self) -> None:
+        if self._process is not None and self._process.poll() is None:
+            self._process.terminate()
+            try:
+                self._process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                self._process.kill()
+
+    def close(self) -> None:
+        self._process = None
 
 
 # Names that suggest a real microphone, and names of inputs that are not one.
@@ -120,7 +193,16 @@ class MicrophoneCapture:
         self.config = config
         self.device = device
         self.device_name = sd.query_devices(device, "input")["name"]
-        self.sample_rate = self._pick_sample_rate()
+        # On Linux, record with arecord when the device has an ALSA hardware name
+        # (see ArecordStream); otherwise, or with MIC_BACKEND=portaudio, use PortAudio.
+        self.alsa_device = alsa_device_for(self.device_name) if sys.platform.startswith("linux") else None
+        use_arecord = config.backend == "arecord" or (
+            config.backend == "auto" and self.alsa_device is not None and shutil.which("arecord") is not None
+        )
+        if config.backend == "arecord" and self.alsa_device is None:
+            self.alsa_device = "default"
+        self.backend = "arecord" if use_arecord else "portaudio"
+        self.sample_rate = TARGET_RATE if use_arecord else self._pick_sample_rate()
         self.block_size = round(self.sample_rate * FRAME_SECONDS)
         self._stream = None
         self._blocks: queue.Queue = queue.Queue()
@@ -164,16 +246,19 @@ class MicrophoneCapture:
             return
         self._blocks = queue.Queue(maxsize=MAX_QUEUED_BLOCKS)
         self._overflows = 0
+        if getattr(self, "backend", "portaudio") == "arecord":
+            self._stream = ArecordStream(self.alsa_device, self._push, self._count_overflow)
+            self._stream.start()
+            return
+
+        first = {"block": True}
 
         def on_audio(indata, frames, time_info, status) -> None:
-            if status.input_overflow:
-                self._overflows += 1
-            try:
-                self._blocks.put_nowait(indata.copy())
-            except queue.Full:  # 30 s behind: drop the oldest block, keep the newest
-                self._overflows += 1
-                self._blocks.get_nowait()
-                self._blocks.put_nowait(indata.copy())
+            # ALSA often flags an overflow on the first block of a new stream; harmless.
+            if status.input_overflow and not first["block"]:
+                self._count_overflow()
+            first["block"] = False
+            self._push(indata.copy())
 
         self._stream = self._sd.InputStream(
             device=self.device,
@@ -181,10 +266,21 @@ class MicrophoneCapture:
             samplerate=self.sample_rate,
             dtype="int16",
             blocksize=self.block_size,
-            latency="high",  # a larger device buffer rides out scheduling hiccups
+            latency=0.5,  # half a second of device buffer rides out scheduling hiccups
             callback=on_audio,
         )
         self._stream.start()
+
+    def _push(self, block: np.ndarray) -> None:
+        try:
+            self._blocks.put_nowait(block)
+        except queue.Full:  # 30 s behind: drop the oldest block, keep the newest
+            self._count_overflow()
+            self._blocks.get_nowait()
+            self._blocks.put_nowait(block)
+
+    def _count_overflow(self) -> None:
+        self._overflows += 1
 
     def discard_pending(self) -> None:
         """Drop queued audio, e.g. the assistant's own voice captured while it spoke."""

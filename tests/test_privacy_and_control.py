@@ -28,7 +28,7 @@ from companion.brain.memory import (  # noqa: E402
 )
 from companion.brain.prompts import NO_RECORDS, NOT_IN_RECORDS_ANSWER, build_system_prompt, build_welcome  # noqa: E402
 from companion.brain.llm import clean_model_response  # noqa: E402
-from companion.audio.capture import MicrophoneCapture, pick_microphone, record_command  # noqa: E402
+from companion.audio.capture import ArecordStream, MicrophoneCapture, alsa_device_for, pick_microphone, record_command  # noqa: E402
 from companion.audio.stt import echoes_prompt, looks_like_noise, reliable  # noqa: E402
 from companion.brain.router import Intent, extract_place, parse_lookup, route  # noqa: E402
 from companion.config import CaptureConfig  # noqa: E402
@@ -522,7 +522,7 @@ class CaptureStreamTests(unittest.TestCase):
             if len(received) == 3:
                 time.sleep(0.3)  # a slow moment on the Pi: the audio thread keeps queueing
         self.assertEqual(received, list(range(20)))
-        self.assertEqual(device.opened[0]["latency"], "high")
+        self.assertEqual(device.opened[0]["latency"], 0.5)
 
     def test_mute_stops_the_stream(self):
         device = FakeSoundDevice([np.zeros(1280, dtype=np.int16)] * 5)
@@ -551,6 +551,15 @@ class CaptureStreamTests(unittest.TestCase):
         self.assertEqual(first + rest, list(range(10)))  # nothing said in between was lost
         self.assertEqual(len(device.opened), 1)  # one stream, opened once
 
+    def test_overflow_on_the_first_block_is_ignored(self):
+        device = FakeSoundDevice([np.zeros(1280, dtype=np.int16)] * 4, overflow_at={0})
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            frames = []
+            for frame in fake_capture(device).frames(should_abort=lambda: len(frames) >= 4):
+                frames.append(frame)
+        self.assertNotIn("overflowed", out.getvalue())
+
     def test_overflow_reported_once(self):
         device = FakeSoundDevice([np.zeros(1280, dtype=np.int16)] * 6, overflow_at={1, 2, 4})
         out = io.StringIO()
@@ -560,6 +569,38 @@ class CaptureStreamTests(unittest.TestCase):
                 frames.append(frame)  # stopping via should_abort reports overflows
         self.assertEqual(out.getvalue().count("overflowed"), 1)
         self.assertIn("overflowed 3 time(s)", out.getvalue())
+
+
+class ArecordTests(unittest.TestCase):
+    def test_alsa_device_from_portaudio_name(self):
+        self.assertEqual(alsa_device_for("USB PnP Sound Device: Audio (hw:2,0)"), "plughw:2,0")
+        self.assertIsNone(alsa_device_for("MacBook Pro Microphone"))
+
+    def test_reads_whole_blocks_and_counts_overruns(self):
+        audio = np.arange(1280 * 3, dtype=np.int16).tobytes()
+
+        class Pipe(io.BytesIO):
+            def read(self, n=-1):  # arecord's pipe returns uneven pieces
+                return super().read(min(n, 1000) if n and n > 0 else n)
+
+        launched = []
+
+        def popen(command, **kwargs):
+            launched.append(command)
+            return SimpleNamespace(stdout=Pipe(audio), stderr=io.BytesIO(b"overrun!!! (at least 12.3 ms long)\n"),
+                                   poll=lambda: 0)
+
+        blocks, overruns = [], []
+        stream = ArecordStream("plughw:2,0", blocks.append, lambda: overruns.append(1), popen=popen)
+        stream.start()
+        deadline = time.monotonic() + 2
+        while (len(blocks) < 3 or not overruns) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertEqual([len(b) for b in blocks], [1280, 1280, 1280])
+        self.assertEqual(int(blocks[2][0]), 2560)  # blocks are contiguous, nothing dropped
+        self.assertEqual(overruns, [1])
+        self.assertIn("--buffer-time=1000000", launched[0])
+        self.assertEqual(launched[0][launched[0].index("-D") + 1], "plughw:2,0")
 
 
 class SpeechFilterTests(unittest.TestCase):

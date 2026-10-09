@@ -101,6 +101,7 @@ class CaptureConfig:
     max_wait_for_speech_seconds: float
     silence_seconds: float
     speech_rms_threshold: float
+    backend: str = "auto"  # "auto" | "arecord" | "portaudio"
 
     @classmethod
     def from_env(cls) -> "CaptureConfig":
@@ -112,6 +113,9 @@ class CaptureConfig:
             max_wait_for_speech_seconds=_env_float("MAX_WAIT_FOR_SPEECH_SECONDS", 30),
             silence_seconds=_env_float("SILENCE_SECONDS", 0.8),
             speech_rms_threshold=_env_float("SPEECH_RMS_THRESHOLD", 450),
+            # auto: arecord on Linux devices with an ALSA name (no overruns from a busy
+            # Python), otherwise PortAudio.
+            backend=os.getenv("MIC_BACKEND", "auto"),
         )
 
 

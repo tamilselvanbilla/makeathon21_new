@@ -60,7 +60,8 @@ def main(argv: list[str] | None = None) -> None:
         from .audio.stt import Transcriber
 
         capture = MicrophoneCapture(config.capture, choose_input_device(config.capture.device))
-        print(f"Microphone: {capture.device_name} at {capture.sample_rate} Hz")
+        via = f"arecord {capture.alsa_device}" if capture.backend == "arecord" else "PortAudio"
+        print(f"Microphone: {capture.device_name} at {capture.sample_rate} Hz via {via}")
         print(f"Loading Whisper '{config.stt.model_size}' (beam {config.stt.beam_size})...")
         wake = None
         if config.wake_word.enabled and not args.no_wake_word:

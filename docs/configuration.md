@@ -39,6 +39,7 @@ Defaults marked **Pi / other** differ by platform. A Raspberry Pi is detected fr
 | Variable | Default | Description |
 |---|---|---|
 | `MIC_DEVICE` | *(automatic)* | Index or part of the name of the input device (`scripts/run.sh --list-mics`). Unset: the system default input, else the first USB/ReSpeaker/"mic" device that isn't a loopback or monitor |
+| `MIC_BACKEND` | `auto` | `auto`: on Linux, record with ALSA's `arecord` when the device has an ALSA hardware name (a separate C process with a 1 s buffer, so a busy Python can't make the sound card overrun), otherwise PortAudio. Force with `arecord` or `portaudio` |
 | `SPEECH_RMS_THRESHOLD` | `450` | Loudness that counts as speech (int16 RMS). Lower for quiet mics, higher for noisy rooms |
 | `SILENCE_SECONDS` | `0.8` | Silence that ends an utterance |
 | `MAX_RECORD_SECONDS` | `15` | Hard cap on one utterance |
