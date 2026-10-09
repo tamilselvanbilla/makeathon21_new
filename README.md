@@ -44,7 +44,7 @@ keeps working with the network cable unplugged.
 | Raw audio never leaves the device | ✅ Done | Audio held in RAM only; the gateway accepts text only, and a test fails if any other module imports a network library |
 | Online calls limited to factual lookups | ✅ Done | Weather via Open-Meteo: only the place name and day leave the device; the reply reads the online facts with their source, then adds local advice. News/search are refused honestly |
 | Honest fallback instead of guessing | 🟡 Basic | `brain/policy.py`; signal-based fallback is planned |
-| Working demo in one human-potential domain | 🟡 Basic | Personal records recall over `knowledge_base/` |
+| Working demo in a human-potential domain | ✅ Memory & recall | Personal records (`knowledge_base/`), notes ("remember that I parked on B2"), past conversations ("what did you tell me about my EMI?") and follow-ups ("and my wife's?"), all stored on the device |
 | Continuous sensing with **wake word** | ✅ Done | "Hey Jarvis" spotted in Whisper transcripts (no wake-word model, MIT licence); after waking, follow-up questions need no wake phrase until 30 s of silence or "that's all" |
 | **Physical mute switch** | ⏳ Next | Interface and software switch done; GPIO driver planned |
 | **Visible listening light** | ⏳ Next | All states implemented, printed to the console; LED driver planned |
@@ -98,6 +98,9 @@ Try asking:
 - "What is my monthly income?" (answered locally from `knowledge_base/personal_data.json`)
 - "Hey Jarvis, what's the weather in Bengaluru?" (only "Bengaluru" and "today" go online; the console shows `[ONLINE]` and `[LOCAL]` steps)
 - then, without the wake phrase: "Do I need an umbrella tomorrow?", and finally "That's all, thanks." to end the conversation
+- "Remember that I parked on level B2" … later, even after a restart: "Where did I park?"
+- "What is my monthly income?" then "And my wife's?"; later "What did you tell me about my wife's income?"
+- "Forget that" / "Forget everything"
 - "Exit" (stops the session)
 
 The `[LED] ...` lines in the console show the indicator state: `IDLE`, `LISTENING`,
@@ -128,7 +131,7 @@ src/
     online_gateway.py             the ONLY module allowed network access
     telemetry.py                  JSON timing logs (no prompts or audio)
     audio/   capture.py, stt.py
-    brain/   llm.py, router.py, prompts.py, policy.py, knowledge.py
+    brain/   llm.py, router.py, prompts.py, policy.py, knowledge.py, memory.py, wake.py
     device/  indicator.py, mute.py, tts.py
 knowledge_base/personal_data.json synthetic personal records used in the demo
 tests/                            unit tests (run without models or audio hardware)
@@ -144,7 +147,11 @@ tests/                            unit tests (run without models or audio hardwa
    documents, recordings), and only contacts allowlisted hosts.
 4. **Models are offline at runtime.** `run.sh` sets `HF_HUB_OFFLINE=1`, so model libraries
    cannot download or report anything.
-5. **Logs hold timings, not content.** `logs/assistant.log` records events and durations,
+5. **Memory stays on the device and can be erased.** Notes and past questions and answers
+   are kept as text in `data/memory.sqlite3` (git-ignored), deleted after 30 days, and
+   erased on request ("forget that", "forget everything"). Audio and ignored speech are
+   never stored; `MEMORY=0` keeps memory for the current session only.
+6. **Logs hold timings, not content.** `logs/assistant.log` records events and durations,
    never prompts, transcripts, or audio.
 
 Points 2 and 3 are enforced by tests in `tests/test_privacy_and_control.py`.
@@ -160,7 +167,7 @@ Points 2 and 3 are enforced by tests in `tests/test_privacy_and_control.py`.
 ## Roadmap
 
 1. **Must-haves:** GPIO mute switch and LED driver (interfaces ready; waiting on hardware choice).
-2. **Core use case:** remember/recall notes, reminders, grammar-constrained intent routing.
+2. **Core use case:** spoken reminders ("remind me at 6"), grammar-constrained intent routing.
 3. **Polish:** signal-based honest fallback, Piper TTS, local web dashboard showing LOCAL vs ONLINE steps, systemd service.
 
 ## Running the tests

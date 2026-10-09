@@ -76,10 +76,13 @@ stateDiagram-v2
 5. **Look up (optional).** `OnlineGateway.lookup` validates the query and calls a
    provider. If it cannot, the assistant says so and stops; it never lets the model
    guess real-time facts.
-6. **Retrieve.** `KnowledgeBase.search` finds personal records (details below). If
-   the question is personal ("my", "I", or a family member's name) and nothing
-   matches, the assistant answers "I couldn't find that in your personal records"
-   without calling the model.
+6. **Retrieve.** Memory commands ("remember that…", "forget that") are handled first,
+   without the model. A follow-up ("and my wife's?") is combined with the previous
+   question. `KnowledgeBase.search` finds personal records and `ConversationMemory.search`
+   finds notes and, for recall questions, past exchanges (details below). An answer
+   that comes only from a note is given directly from it. If the question is personal
+   and nothing matches anywhere, the assistant answers "I couldn't find that in your
+   personal records" without calling the model.
 7. **Reason locally.** `LocalLLM.chat` answers from the system prompt, question,
    owner-labelled records, and any online facts.
 8. **Check.** `require_local_answer` replaces empty or uncertain answers with an honest
@@ -104,6 +107,8 @@ continues, so an always-on device does not die on one bad request.
 | `companion/brain/prompts.py` | System prompt and prompt assembly | `SYSTEM_PROMPT`, `build_user_prompt` |
 | `companion/brain/policy.py` | What may go online; when to fall back | `is_allowed_cloud_lookup`, `require_local_answer` |
 | `companion/brain/knowledge.py` | Loads personal records and searches them (FTS5, owners, record-type focus) | `load_knowledge`, `KnowledgeBase`, `Match` |
+| `companion/brain/memory.py` | Notes, past exchanges, follow-ups, forgetting; SQLite on the device | `ConversationMemory`, `parse_memory_command`, `MemoryItem` |
+| `companion/brain/wake.py` | Wake phrase and sleep commands in transcripts | `WakePhrase`, `is_sleep_command` |
 | `companion/device/indicator.py` | Listening-light states | `IndicatorState`, `Indicator`, `ConsoleIndicator` |
 | `companion/device/mute.py` | Mute switch | `MuteSwitch`, `SoftwareMuteSwitch` |
 | `companion/device/tts.py` | Spoken output: espeak-ng + aplay on Linux (no sound server needed), pyttsx3 elsewhere | `Speaker`, `EspeakSpeaker`, `Pyttsx3Speaker`, `PrintSpeaker`, `make_speaker` |
@@ -129,6 +134,23 @@ question:
 The system prompt names the primary user, tells the model to address them as "you",
 states the currency (`CURRENCY`, default INR), and includes a one-line example answer,
 which a 0.6B model follows more reliably than rules.
+
+## Conversation memory
+
+`ConversationMemory` keeps text (never audio) in an FTS5 table in
+`data/memory.sqlite3`, one row per note or exchange, with a timestamp.
+
+| Memory | Stored when | Used when |
+|---|---|---|
+| Note | "Remember (that) …" | Every question. If a note is the only match, the reply is built from it directly ("On 9 October you told me that you parked on level B2"), so a small model can't misquote it |
+| Exchange | A question got a real answer (honest "not in your records" or failed lookups are **not** stored, so they can't come back as facts) | Recall questions only ("did you…", "what did you tell me…", "earlier", "yesterday"), so old answers don't distract ordinary ones. "Yesterday" filters by date |
+| Previous exchange | Same | A follow-up starting with "and", "what about", "how about" within `FOLLOW_UP_MINUTES`; it is combined with the previous question for routing and search, and shown to the model. For weather, a newly named place replaces the old one ("what about in Mumbai?") |
+
+Entries older than `MEMORY_RETENTION_DAYS` are deleted at startup; "forget that" and
+"forget everything" delete on request. Knowledge search also refuses to answer when a
+meaningful word of the question appears in none of the matching records ("where is my
+car key" is not answered from a car record), so such questions fall through to memory
+or to an honest "not found".
 
 ## The online/offline boundary
 
@@ -180,6 +202,7 @@ stateDiagram-v2
 | Models loaded once at startup | Loading takes seconds; per-request loading would dominate latency |
 | Stages run sequentially | STT and LLM each get all four cores instead of competing |
 | Lazy imports | Text mode and tests run without audio libraries; startup loads only what is used |
+| Memory in SQLite FTS5, top 3 items | No embedding model in RAM; search is instant; only relevant items reach the prompt |
 | Wake phrase via Whisper, first 3 s only | No extra model in RAM; room conversation costs one short `tiny.en` pass per utterance instead of a full transcription |
 
 ## Extension points

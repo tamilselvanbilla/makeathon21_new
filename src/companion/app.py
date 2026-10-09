@@ -5,6 +5,7 @@ import time
 
 from .brain.knowledge import KnowledgeBase, load_knowledge
 from .brain.llm import LocalLLM
+from .brain.memory import ConversationMemory
 from .brain.wake import WakePhrase
 from .config import IS_RASPBERRY_PI, AppConfig
 from .device.indicator import ConsoleIndicator
@@ -75,6 +76,12 @@ def main(argv: list[str] | None = None) -> None:
         indicator=indicator,
         speaker=speaker,
         default_place=config.default_place,
+        memory=ConversationMemory(
+            config.memory.path,
+            retention_days=config.memory.retention_days,
+            follow_up_minutes=config.memory.follow_up_minutes,
+            top_k=config.memory.top_k,
+        ),
     )
 
     startup_ms = (time.perf_counter() - started_at) * 1000
@@ -85,5 +92,7 @@ def main(argv: list[str] | None = None) -> None:
         hint = f"Say '{source.wake.phrase}' and your request; 'that's all' ends a conversation. Ctrl+C stops."
     else:
         hint = "Speak your request. Ctrl+C stops."
+    where = config.memory.path or "RAM only (MEMORY=0)"
+    print(f"Memory: {where}, kept {config.memory.retention_days} days")
     print(f"Ready in {startup_ms / 1000:.1f}s. {hint}")
     assistant.run(source)

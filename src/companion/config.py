@@ -133,6 +133,28 @@ class WakeWordConfig:
 
 
 @dataclass(frozen=True)
+class MemoryConfig:
+    path: Path | None
+    retention_days: int
+    follow_up_minutes: float
+    top_k: int
+
+    @classmethod
+    def from_env(cls) -> "MemoryConfig":
+        return cls(
+            # MEMORY=0 keeps memory in RAM for the session only; nothing is written.
+            path=Path(os.getenv("MEMORY_FILE", str(PROJECT_ROOT / "data" / "memory.sqlite3")))
+            if _env_bool("MEMORY", True)
+            else None,
+            # Older notes and conversations are deleted at startup.
+            retention_days=_env_int("MEMORY_RETENTION_DAYS", 30),
+            # "And my wife's?" uses the previous question if it was this recent.
+            follow_up_minutes=_env_float("FOLLOW_UP_MINUTES", 10),
+            top_k=_env_int("MEMORY_TOP_K", 3),
+        )
+
+
+@dataclass(frozen=True)
 class KnowledgeConfig:
     path: Path
     primary_user: str | None
@@ -158,6 +180,7 @@ class AppConfig:
     capture: CaptureConfig
     wake_word: WakeWordConfig
     knowledge: KnowledgeConfig
+    memory: MemoryConfig
     online_lookups_enabled: bool
     default_place: str
     tts_enabled: bool
@@ -170,6 +193,7 @@ class AppConfig:
             capture=CaptureConfig.from_env(),
             wake_word=WakeWordConfig.from_env(),
             knowledge=KnowledgeConfig.from_env(),
+            memory=MemoryConfig.from_env(),
             online_lookups_enabled=_env_bool("ONLINE_LOOKUPS", True),
             # Place used for weather questions that don't name one.
             default_place=os.getenv("DEFAULT_PLACE", "Bengaluru"),

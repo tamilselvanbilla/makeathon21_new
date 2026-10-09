@@ -96,6 +96,26 @@ spelled differently each time and won't match. Check yours with
 "thank you" or "no thanks" put it back to sleep, as do 30 s of silence and the mute
 switch. By voice it never shuts down; `Ctrl+C` stops the program.
 
+## Memory
+
+| Variable | Default | Description |
+|---|---|---|
+| `MEMORY` | `1` | `0` keeps memory in RAM for the current session only; nothing is written to disk |
+| `MEMORY_FILE` | `data/memory.sqlite3` | Where notes and past conversations are stored (git-ignored) |
+| `MEMORY_RETENTION_DAYS` | `30` | Older entries are deleted at startup |
+| `FOLLOW_UP_MINUTES` | `10` | How recent the previous question must be for "and my wife's?" to build on it |
+| `MEMORY_TOP_K` | `3` | Remembered items given to the model per question |
+
+Voice commands:
+
+| Say | Effect |
+|---|---|
+| "Remember (that) …", "Note (that) …", "Make a note …" | Saves a note; confirmed as "Okay, I'll remember that you …" |
+| "Forget that", "Forget the last thing", "Delete that" | Deletes the most recent note or exchange |
+| "Forget everything", "Clear your memory" | Deletes all memory |
+
+To inspect memory on the device: `sqlite3 data/memory.sqlite3 "SELECT created, kind, question, answer FROM memory"`.
+
 ## Set by `scripts/run.sh`
 
 | Variable | Value | Why |

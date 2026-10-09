@@ -11,6 +11,8 @@ from ..online_gateway import LookupRequest
 from .policy import WEATHER_TERMS, is_allowed_cloud_lookup
 
 EXIT_PHRASES = frozenset({"quit", "exit", "stop", "goodbye"})
+# "Where is my umbrella?" asks about an object, not the weather.
+WHERE_IS = re.compile(r"^\W*where(?:'s|\s+is|\s+are|\s+did|\s+do)\b", re.IGNORECASE)
 
 # "in Bengaluru", "for New York tomorrow", "at Chennai?" -> the place name.
 PLACE_AFTER_PREPOSITION = re.compile(
@@ -30,7 +32,7 @@ class Intent(str, Enum):
 def route(text: str) -> Intent:
     if text.casefold().strip(" .!?") in EXIT_PHRASES:
         return Intent.EXIT
-    if is_allowed_cloud_lookup(text):
+    if is_allowed_cloud_lookup(text) and not WHERE_IS.match(text):
         return Intent.ONLINE_LOOKUP
     return Intent.LOCAL_REASONING
 

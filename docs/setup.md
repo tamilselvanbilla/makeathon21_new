@@ -235,6 +235,19 @@ shown or kept.
 If it doesn't wake, check what Whisper heard: run with `--no-wake-word` and look at the
 `You:` line. Pick a phrase it spells consistently (configuration.md, *Wake phrase*).
 
+### Memory
+
+```
+You: Remember that I parked on level B2
+Assistant: Okay, I'll remember that you parked on level B2.
+You: what is my monthly income
+You: and my wife's?                      <- uses the previous question
+```
+
+Restart the assistant, then ask "Where did I park?": "On 9 October you told me that
+you parked on level B2." The console shows `[MEMORY] using 1 remembered item(s)`
+whenever memory contributes. "Forget that" and "Forget everything" erase it.
+
 ### Online lookup
 
 Ask "what's the weather in Mysore tomorrow?". The console shows exactly what left

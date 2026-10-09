@@ -36,7 +36,8 @@ STOPWORDS = frozenset(
     a about all an and any are as at be can could did do does for from give has
     have how i in info information is it its list me mine my myself need of on
     or our please record records show tell the their there this to us was we
-    what when where which who whom why will with you your
+    what when where which who whom why will with you your much many latest
+    detail details know get got not no
     """.split()
 )
 # Everyday words mapped to the vocabulary used in the records, so "earn"
@@ -56,6 +57,9 @@ SYNONYMS = {
     "bp": "blood pressure", "medicine": "medication prescription", "tablet": "medication prescription",
     "study": "school college qualification", "studied": "school college qualification",
     "education": "school college qualification",
+    "id": "identification document", "identity": "identification document",
+    "finish": "years period", "finished": "years period", "graduate": "years college qualification",
+    "graduated": "years college qualification", "join": "period years", "joined": "period years",
 }
 
 Records = dict[str, list[dict[str, Any]]]
@@ -103,13 +107,13 @@ def _format_record(entry: dict[str, Any]) -> str:
     return "; ".join(parts)
 
 
-def _synonyms(word: str) -> list[str]:
+def synonyms_for(word: str) -> list[str]:
     """Synonym expansion that also accepts simple plurals ("investments")."""
     found = SYNONYMS.get(word) or (SYNONYMS.get(word[:-1]) if word.endswith("s") else None)
     return found.split() if found else []
 
 
-def _words(text: str) -> list[str]:
+def tokenize(text: str) -> list[str]:
     """Lower-case word tokens with possessive 's removed ("wife's" -> "wife")."""
     return [re.sub(r"'s$", "", word) for word in re.findall(r"[a-z0-9]+(?:'s)?", text.casefold())]
 
@@ -137,9 +141,9 @@ class KnowledgeBase:
 
     def _owner_aliases(self, records: Records, owners: Counter) -> dict[str, set[str]]:
         """Words that refer to each non-primary owner: "John's wife" -> {wife, jane}."""
-        primary_words = set(_words(self.primary_user))
+        primary_words = set(tokenize(self.primary_user))
         aliases = {
-            owner: set(_words(owner)) - primary_words
+            owner: set(tokenize(owner)) - primary_words
             for owner in owners
             if owner != self.primary_user
         }
@@ -147,7 +151,7 @@ class KnowledgeBase:
             for entry in entries:
                 owner = str(entry.get("owner") or "")
                 if owner in aliases and entry.get("name") and entry.get("relationship"):
-                    aliases[owner] |= set(_words(str(entry["name"])))
+                    aliases[owner] |= set(tokenize(str(entry["name"])))
         return aliases
 
     def _build_index(self, records: Records) -> sqlite3.Connection:
@@ -174,27 +178,27 @@ class KnowledgeBase:
         return db
 
     def mentioned_owners(self, question: str) -> set[str]:
-        words = set(_words(question))
+        words = set(tokenize(question))
         return {owner for owner, alias in self._aliases.items() if words & alias}
 
     def allowed_owners(self, question: str) -> set[str]:
         mentioned = self.mentioned_owners(question)
-        if any(set(_words(owner)) & SHARED_OWNER_WORDS for owner in mentioned):
+        if any(set(tokenize(owner)) & SHARED_OWNER_WORDS for owner in mentioned):
             return {self.primary_user, *self._aliases}  # "my family" covers everyone
         if mentioned:
             return mentioned
-        shared = {owner for owner in self._aliases if set(_words(owner)) & SHARED_OWNER_WORDS}
+        shared = {owner for owner in self._aliases if set(tokenize(owner)) & SHARED_OWNER_WORDS}
         return {self.primary_user, *shared}
 
     def is_personal(self, question: str) -> bool:
         """True when the question is about the user's (or their family's) own data."""
-        return bool(set(_words(question)) & PERSONAL_WORDS) or bool(self.mentioned_owners(question))
+        return bool(set(tokenize(question)) & PERSONAL_WORDS) or bool(self.mentioned_owners(question))
 
     def _terms(self, question: str) -> tuple[list[str], list[str]]:
         """Search terms (with synonyms) and the words that were expanded."""
-        words = [word for word in _words(question) if word not in STOPWORDS]
-        expanded = [word for word in words if _synonyms(word)]
-        terms = words + [extra for word in expanded for extra in _synonyms(word)]
+        words = [word for word in tokenize(question) if word not in STOPWORDS]
+        expanded = [word for word in words if synonyms_for(word)]
+        terms = words + [extra for word in expanded for extra in synonyms_for(word)]
         return list(dict.fromkeys(terms)), list(dict.fromkeys(expanded))
 
     def search(self, question: str) -> list[Match]:
@@ -226,20 +230,26 @@ class KnowledgeBase:
             if focused:
                 hits = focused
 
-        hits = hits[: self.top_k]
         if hits and not self._covers_asked_attributes(question, [row[0] for row in hits]):
             # e.g. "when does my passport expire" when the passport record has no
             # expiry: return nothing so the assistant says so instead of guessing.
             return []
-        return [Match(*row[1:]) for row in hits]
+        return [Match(*row[1:]) for row in hits[: self.top_k]]
 
     def _covers_asked_attributes(self, question: str, rowids: list[int]) -> bool:
-        """True if every attribute the question asks about (expiry, earnings, EMI...)
-        appears in at least one of the selected records."""
-        _, expanded = self._terms(question)
+        """True if every meaningful word of the question (or a synonym) appears in
+        at least one selected record: "where is my car key" must not be answered
+        from a car record that never mentions a key."""
+        owner_words = {word for alias in self._aliases.values() for word in alias}
+        words = [
+            word
+            for word in dict.fromkeys(tokenize(question))
+            if word not in STOPWORDS and word not in CATEGORY_WORDS and word not in owner_words
+            and word not in PERSONAL_WORDS and word not in tokenize(self.primary_user)
+        ]
         placeholders = ",".join("?" * len(rowids))
-        for word in expanded:
-            concept = " OR ".join(f'"{term}"' for term in [word, *_synonyms(word)])
+        for word in words:
+            concept = " OR ".join(f'"{term}"' for term in [word, *synonyms_for(word)])
             found = self._db.execute(
                 f"SELECT 1 FROM records WHERE records MATCH ? AND rowid IN ({placeholders}) LIMIT 1",
                 (f"body : ({concept})", *rowids),
@@ -257,6 +267,6 @@ class KnowledgeBase:
         _, expanded = self._terms(question)
         if expanded:
             # Tell the model how the user's words map to the record fields ("EMI" -> installment).
-            notes = "; ".join(f"'{word}' refers to {', '.join(_synonyms(word))}" for word in expanded)
+            notes = "; ".join(f"'{word}' refers to {', '.join(synonyms_for(word))}" for word in expanded)
             lines.append(f"Note: {notes}.")
         return "\n".join(lines)

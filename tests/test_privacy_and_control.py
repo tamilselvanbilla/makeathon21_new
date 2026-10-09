@@ -3,7 +3,9 @@ import contextlib
 import io
 import subprocess
 import sys
+import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -14,6 +16,7 @@ sys.path.insert(0, str(SRC))
 
 from companion.brain import policy  # noqa: E402
 from companion.brain.knowledge import KnowledgeBase  # noqa: E402
+from companion.brain.memory import ConversationMemory, MemoryCommand, parse_memory_command  # noqa: E402
 from companion.brain.prompts import NOT_IN_RECORDS_ANSWER  # noqa: E402
 from companion.brain.llm import clean_model_response  # noqa: E402
 from companion.audio.capture import record_command  # noqa: E402
@@ -186,13 +189,25 @@ SAMPLE_RECORDS = {
 }
 
 
-def make_assistant(llm=None, gateway=None):
+class Clock:
+    def __init__(self, start=datetime(2026, 10, 9, 10, 0)):
+        self.now = start
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, **delta):
+        self.now += timedelta(**delta)
+
+
+def make_assistant(llm=None, gateway=None, memory=None):
     indicator = RecordingIndicator()
     speaker = FakeSpeaker()
     assistant = Assistant(
         llm=llm or FakeLLM(),
         knowledge=KnowledgeBase(SAMPLE_RECORDS),
         gateway=gateway or OnlineGateway(enabled=True, fetch=FakeFetch()),
+        memory=memory,
         indicator=indicator,
         speaker=speaker,
     )
@@ -288,6 +303,8 @@ class ReasoningTests(unittest.TestCase):
     def test_rain_matches_whole_words_only(self):
         self.assertIs(route("will it rain in Chennai"), Intent.ONLINE_LOOKUP)
         self.assertIs(route("when is my train"), Intent.LOCAL_REASONING)
+        self.assertIs(route("where is my umbrella?"), Intent.LOCAL_REASONING)
+        self.assertIs(route("do I need an umbrella tomorrow?"), Intent.ONLINE_LOOKUP)
 
     def test_router(self):
         self.assertIs(route("Exit."), Intent.EXIT)
@@ -419,6 +436,111 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("something went wrong", speaker.said[0])
         self.assertEqual(speaker.said[1], "Goodbye.")
         self.assertIs(indicator.states[-1], IndicatorState.IDLE)
+
+
+class MemoryTests(unittest.TestCase):
+    def setUp(self):
+        self.clock = Clock()
+        self.memory = ConversationMemory(clock=self.clock)
+
+    def test_memory_commands(self):
+        self.assertEqual(
+            parse_memory_command("Remember that I parked on level B2."),
+            MemoryCommand("remember", "I parked on level B2"),
+        )
+        self.assertEqual(parse_memory_command("note my locker code is 4512"), MemoryCommand("remember", "my locker code is 4512"))
+        self.assertEqual(parse_memory_command("Forget that."), MemoryCommand("forget_last"))
+        self.assertEqual(parse_memory_command("forget everything"), MemoryCommand("forget_all"))
+        self.assertIsNone(parse_memory_command("do you remember where I parked"))
+        self.assertIsNone(parse_memory_command("what is my EMI"))
+
+    def test_notes_are_found_by_stemmed_words(self):
+        self.memory.add_note("I parked on level B2")
+        self.assertIn("parked on level B2", self.memory.context_for("where did I park?"))
+
+    def test_past_turns_only_for_recall_questions(self):
+        self.memory.add_turn("what is my EMI", "Your EMI is INR 9200.")
+        self.assertEqual(self.memory.context_for("what is my EMI"), "")
+        self.assertIn("INR 9200", self.memory.context_for("what did you tell me about my EMI?"))
+
+    def test_yesterday_filter(self):
+        self.memory.add_turn("what is my EMI", "Your EMI is INR 9200.")
+        self.clock.advance(days=1)
+        self.memory.add_turn("when does my passport expire", "Not in your records.")
+        context = self.memory.context_for("what did I ask yesterday?")
+        self.assertIn("EMI", context)
+        self.assertNotIn("passport", context)
+
+    def test_follow_up_window(self):
+        self.memory.add_turn("what is my monthly income", "Your monthly income is INR 85,000.")
+        self.assertEqual(self.memory.last_turn().question, "what is my monthly income")
+        self.clock.advance(minutes=11)
+        self.assertIsNone(self.memory.last_turn())
+
+    def test_forget(self):
+        self.memory.add_note("my locker code is 4512")
+        self.memory.add_note("I parked on level B2")
+        self.assertEqual(self.memory.forget_last().question, "I parked on level B2")
+        self.assertEqual(self.memory.forget_all(), 1)
+        self.assertEqual(self.memory.context_for("locker code"), "")
+
+    def test_persists_across_restarts_and_expires(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "memory.sqlite3"
+            ConversationMemory(path, clock=self.clock).add_note("I parked on level B2")
+            self.assertIn("B2", ConversationMemory(path, clock=self.clock).context_for("where did I park"))
+            self.clock.advance(days=31)
+            self.assertEqual(ConversationMemory(path, clock=self.clock).context_for("where did I park"), "")
+
+
+class AssistantMemoryTests(unittest.TestCase):
+    def setUp(self):
+        self.memory = ConversationMemory(clock=Clock())
+
+    def test_remember_is_confirmed_without_the_model(self):
+        llm = FakeLLM()
+        assistant, _, _ = make_assistant(llm=llm, memory=self.memory)
+        reply, _ = quietly(assistant.respond, "Remember that I parked on level B2")
+        self.assertEqual(reply, "Okay, I'll remember that you parked on level B2.")
+        self.assertEqual(llm.calls, [])
+
+    def test_recall_answers_from_the_note_without_the_model(self):
+        llm = FakeLLM()
+        assistant, _, _ = make_assistant(llm=llm, memory=self.memory)
+        quietly(assistant.respond, "remember that I parked on level B2")
+        reply, out = quietly(assistant.respond, "Where did I park?")
+        self.assertEqual(reply, "On 9 October you told me that you parked on level B2.")
+        self.assertEqual(llm.calls, [])
+        self.assertIn("[MEMORY] using 1 remembered item", out)
+
+    def test_recall_of_past_answers_goes_through_the_model(self):
+        llm = FakeLLM("I told you your EMI is INR 9200.")
+        assistant, _, _ = make_assistant(llm=llm, memory=self.memory)
+        quietly(assistant.respond, "what is my EMI")
+        quietly(assistant.respond, "what did you tell me about my EMI?")
+        self.assertIn("You answered: I told you", llm.calls[-1])
+
+    def test_follow_up_uses_the_previous_question(self):
+        llm = FakeLLM("Your wife's monthly income is INR 62,000.")
+        assistant, _, _ = make_assistant(llm=llm, memory=self.memory)
+        quietly(assistant.respond, "what is my monthly income")
+        quietly(assistant.respond, "And my wife's?")
+        prompt = llm.calls[-1]
+        self.assertIn("Previous question: what is my monthly income", prompt)
+        self.assertIn("record of John's wife", prompt)
+
+    def test_honest_misses_are_not_remembered(self):
+        assistant, _, _ = make_assistant(memory=self.memory)
+        quietly(assistant.respond, "what is my blood group")
+        self.assertIsNone(self.memory.last_turn())
+
+    def test_weather_follow_up_changes_only_the_place(self):
+        fetch = FakeFetch()
+        assistant, _, _ = make_assistant(gateway=OnlineGateway(fetch=fetch), memory=self.memory)
+        quietly(assistant.respond, "weather in Bengaluru tomorrow")
+        quietly(assistant.respond, "What about in Mumbai?")
+        geocoded = [params["name"] for url, params in fetch.sent if url == GEOCODING_URL]
+        self.assertEqual(geocoded, ["Bengaluru", "Mumbai"])
 
 
 class CommandRecordingTests(unittest.TestCase):

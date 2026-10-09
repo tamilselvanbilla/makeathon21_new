@@ -10,7 +10,8 @@ def build_system_prompt(primary_user: str, currency: str = "INR") -> str:
         f"'I', 'me' and 'my' in questions mean {primary_user}; speak to them as "
         "'you'. Each knowledge "
         "record says whose it is; never attribute one person's record to "
-        "someone else. Use only the supplied knowledge and the question. Never "
+        "someone else. Use only the supplied knowledge, memory, and the question; "
+        "memory is what the user told you earlier, so trust it. Never "
         "invent medical, financial, document, or history information; if the "
         "knowledge does not contain the answer, say so. For medical or "
         "financial decisions, state uncertainty and recommend qualified "
@@ -21,9 +22,15 @@ def build_system_prompt(primary_user: str, currency: str = "INR") -> str:
     )
 
 
-def build_user_prompt(question: str, knowledge: str) -> str:
-    """Combine the question with local knowledge."""
-    return f"Question: {question}\nKnowledge: {knowledge or NO_RECORDS}"
+def build_user_prompt(question: str, knowledge: str, memory: str = "", earlier: str = "") -> str:
+    """Combine the question with local knowledge, memory, and the previous exchange."""
+    parts = []
+    if earlier:
+        parts.append(f"Previous question: {earlier}")
+    parts += [f"Question: {question}", f"Knowledge: {knowledge or NO_RECORDS}"]
+    if memory:
+        parts.append(f"Memory (things the user told you and past conversations):\n{memory}")
+    return "\n".join(parts)
 
 
 def build_advice_prompt(question: str, online_facts: str, knowledge: str) -> str:
