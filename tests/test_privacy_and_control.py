@@ -5,8 +5,6 @@ import io
 import subprocess
 import sys
 import tempfile
-import threading
-import time
 from types import SimpleNamespace
 import unittest
 from datetime import datetime, timedelta
@@ -28,8 +26,8 @@ from companion.brain.memory import (  # noqa: E402
 )
 from companion.brain.prompts import NO_RECORDS, NOT_IN_RECORDS_ANSWER, build_system_prompt, build_welcome  # noqa: E402
 from companion.brain.llm import clean_model_response  # noqa: E402
-from companion.audio.capture import ArecordStream, MicrophoneCapture, alsa_device_for, pick_microphone, record_command  # noqa: E402
-from companion.audio.stt import echoes_prompt, looks_like_noise, reliable  # noqa: E402
+from companion.audio.capture import pick_microphone, record_command  # noqa: E402
+from companion.audio.stt import looks_like_noise, reliable  # noqa: E402
 from companion.brain.router import Intent, extract_place, parse_lookup, route  # noqa: E402
 from companion.config import CaptureConfig  # noqa: E402
 from companion.device.indicator import ConsoleIndicator, IndicatorState  # noqa: E402
@@ -45,7 +43,6 @@ from companion.online_gateway import (  # noqa: E402
     OnlineGateway,
     check_host_allowed,
 )
-from companion.brain.wake import WakePhrase, is_sleep_command  # noqa: E402
 from companion.pipeline import Assistant, MicInput  # noqa: E402
 
 NETWORK_MODULES = {"requests", "httpx", "urllib3", "aiohttp", "socket", "http.client", "urllib.request"}
@@ -181,19 +178,9 @@ class FakeTranscriber:
         self.texts = list(texts) or ["what is my income"]
         self.lengths = []
 
-    def transcribe(self, audio, use_hotwords=True, hotwords=None):
+    def transcribe(self, audio):
         self.lengths.append(len(audio) / 16000)
         return self.texts.pop(0) if len(self.texts) > 1 else self.texts[0]
-
-
-def conversation(transcripts, seconds=(1,), muted=False, timeout=30):
-    capture = FakeCapture(*seconds)
-    transcriber = FakeTranscriber(*transcripts)
-    indicator = RecordingIndicator()
-    source = MicInput(
-        capture, transcriber, SoftwareMuteSwitch(muted), indicator, WakePhrase("hey sam"), timeout
-    )
-    return source, capture, transcriber, indicator
 
 
 def quietly(fn, *args):
@@ -475,144 +462,11 @@ class MicrophoneSelectionTests(unittest.TestCase):
             pick_microphone(self.PI, 0, "ReSpeaker")
 
 
-class FakeSoundDevice:
-    """Delivers `blocks` from its own thread through the callback, like PortAudio."""
-
-    def __init__(self, blocks, overflow_at=()):
-        self.blocks, self.overflow_at, self.opened = blocks, set(overflow_at), []
-
-    def InputStream(self, callback, **settings):
-        device = self
-        device.opened.append(settings)
-
-        class Stream:
-            closed = False
-
-            def start(self):
-                def run():
-                    for i, block in enumerate(device.blocks):
-                        callback(block.reshape(-1, 1), len(block), None,
-                                 SimpleNamespace(input_overflow=i in device.overflow_at))
-                threading.Thread(target=run, daemon=True).start()
-
-            def stop(self):
-                pass
-
-            def close(self):
-                Stream.closed = True
-
-        device.stream_class = Stream
-        return Stream()
-
-
-def fake_capture(device):
-    capture = MicrophoneCapture.__new__(MicrophoneCapture)  # no real microphone
-    capture._sd, capture.config, capture.device = device, CAPTURE, 0
-    capture.sample_rate, capture.block_size = 16000, 1280
-    capture._stream, capture._blocks, capture._overflows = None, None, 0
-    return capture
-
-
-class CaptureStreamTests(unittest.TestCase):
-    def test_stalls_delay_audio_instead_of_losing_it(self):
-        device = FakeSoundDevice([np.full(1280, i, dtype=np.int16) for i in range(20)])
-        received = []
-        for frame in fake_capture(device).frames(should_abort=lambda: len(received) >= 20):
-            received.append(int(frame[0]))
-            if len(received) == 3:
-                time.sleep(0.3)  # a slow moment on the Pi: the audio thread keeps queueing
-        self.assertEqual(received, list(range(20)))
-        self.assertEqual(device.opened[0]["latency"], 0.5)
-
-    def test_mute_stops_the_stream(self):
-        device = FakeSoundDevice([np.zeros(1280, dtype=np.int16)] * 5)
-        muted = threading.Event()
-        threading.Timer(0.3, muted.set).start()
-        capture = fake_capture(device)
-        frames = list(capture.frames(should_abort=muted.is_set))
-        self.assertEqual(len(frames), 5)  # everything delivered, then stopped when muted
-        self.assertTrue(device.stream_class.closed)  # muted means the microphone is off
-        self.assertIsNone(capture._stream)
-
-    def test_microphone_stays_open_between_utterances(self):
-        device = FakeSoundDevice([np.full(1280, i, dtype=np.int16) for i in range(10)])
-        capture = fake_capture(device)
-        first = []
-        for frame in capture.frames():
-            first.append(int(frame[0]))
-            if len(first) == 4:
-                break  # one utterance ends; the stream must keep capturing
-        time.sleep(0.2)  # e.g. transcribing the previous utterance
-        rest = []
-        for frame in capture.frames():
-            rest.append(int(frame[0]))
-            if len(first) + len(rest) == 10:
-                break
-        self.assertEqual(first + rest, list(range(10)))  # nothing said in between was lost
-        self.assertEqual(len(device.opened), 1)  # one stream, opened once
-
-    def test_overflow_on_the_first_block_is_ignored(self):
-        device = FakeSoundDevice([np.zeros(1280, dtype=np.int16)] * 4, overflow_at={0})
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            frames = []
-            for frame in fake_capture(device).frames(should_abort=lambda: len(frames) >= 4):
-                frames.append(frame)
-        self.assertNotIn("overflowed", out.getvalue())
-
-    def test_overflow_reported_once(self):
-        device = FakeSoundDevice([np.zeros(1280, dtype=np.int16)] * 6, overflow_at={1, 2, 4})
-        out = io.StringIO()
-        with contextlib.redirect_stdout(out):
-            frames = []
-            for frame in fake_capture(device).frames(should_abort=lambda: len(frames) >= 6):
-                frames.append(frame)  # stopping via should_abort reports overflows
-        self.assertEqual(out.getvalue().count("overflowed"), 1)
-        self.assertIn("overflowed 3 time(s)", out.getvalue())
-
-
-class ArecordTests(unittest.TestCase):
-    def test_alsa_device_from_portaudio_name(self):
-        self.assertEqual(alsa_device_for("USB PnP Sound Device: Audio (hw:2,0)"), "plughw:2,0")
-        self.assertIsNone(alsa_device_for("MacBook Pro Microphone"))
-
-    def test_reads_whole_blocks_and_counts_overruns(self):
-        audio = np.arange(1280 * 3, dtype=np.int16).tobytes()
-
-        class Pipe(io.BytesIO):
-            def read(self, n=-1):  # arecord's pipe returns uneven pieces
-                return super().read(min(n, 1000) if n and n > 0 else n)
-
-        launched = []
-
-        def popen(command, **kwargs):
-            launched.append(command)
-            return SimpleNamespace(stdout=Pipe(audio), stderr=io.BytesIO(b"overrun!!! (at least 12.3 ms long)\n"),
-                                   poll=lambda: 0)
-
-        blocks, overruns = [], []
-        stream = ArecordStream("plughw:2,0", blocks.append, lambda: overruns.append(1), popen=popen)
-        stream.start()
-        deadline = time.monotonic() + 2
-        while (len(blocks) < 3 or not overruns) and time.monotonic() < deadline:
-            time.sleep(0.01)
-        self.assertEqual([len(b) for b in blocks], [1280, 1280, 1280])
-        self.assertEqual(int(blocks[2][0]), 2560)  # blocks are contiguous, nothing dropped
-        self.assertEqual(overruns, [1])
-        self.assertIn("--buffer-time=1000000", launched[0])
-        self.assertEqual(launched[0][launched[0].index("-D") + 1], "plughw:2,0")
-
-
 class SpeechFilterTests(unittest.TestCase):
     def test_repetitive_noise_transcripts_are_dropped(self):
         self.assertTrue(looks_like_noise("M.D. M.D. M.D. You have to back up. M.D. S.B. S.B. S.B. S.B. S.B. S.B."))
         self.assertFalse(looks_like_noise("Can you give me what are the medications I am taking daily?"))
         self.assertFalse(looks_like_noise("no no no no"))  # short answers are kept
-
-    def test_hotword_echo_is_dropped(self):
-        self.assertTrue(echoes_prompt("Hello, my name is Sam EMI PAN Aadhaar", "EMI PAN Aadhaar Bengaluru"))
-        self.assertFalse(echoes_prompt("What is my EMI?", "EMI PAN Aadhaar Bengaluru"))
-        self.assertFalse(echoes_prompt("What is my PAN card number?", "EMI PAN Aadhaar Bengaluru"))
 
     def test_whisper_quality_signals(self):
         segment = lambda **kw: SimpleNamespace(**{"no_speech_prob": 0.1, "avg_logprob": -0.3, "compression_ratio": 1.2, **kw})  # noqa: E731
@@ -630,10 +484,8 @@ class PromptTests(unittest.TestCase):
                      "general questions", "identity numbers only when asked"):
             self.assertIn(part, prompt)
 
-    def test_welcome_names_the_assistant_and_how_to_wake_it(self):
-        welcome = build_welcome("Sam", "John", "hey sam")
-        self.assertEqual(welcome, 'Hello John, I\'m Sam, your private assistant. Say "Hey Sam" to start.')
-        self.assertTrue(build_welcome("Sam", "John", None).endswith("Ask me anything."))
+    def test_welcome_names_the_assistant(self):
+        self.assertEqual(build_welcome("Sam", "John"), "Hello John, I'm Sam, your private assistant. Ask me anything.")
 
 
 class PipelineTests(unittest.TestCase):
@@ -1028,126 +880,14 @@ class CommandRecordingTests(unittest.TestCase):
         self.assertEqual(record_command(iter(frames(1000, 1000)), CAPTURE, max_wait_seconds=6).size, 0)
 
 
-class WakePhraseTests(unittest.TestCase):
-    def setUp(self):
-        self.wake = WakePhrase("hey sam")
-
-    def test_request_after_wake_phrase(self):
-        self.assertEqual(self.wake.strip("Hey Sam, what's the weather today?"), "What's the weather today?")
-        self.assertEqual(self.wake.strip("hi sam what is my EMI"), "What is my EMI")  # no pause, request word
-        self.assertEqual(self.wake.strip("OK Sam."), "")
-
-    def test_other_speech_is_not_a_request(self):
-        for text in (
-            "Sam is coming for dinner tonight.",  # greeting required for "hey sam"
-            "Sam, where did I park?",
-            "Hey, Sam called about the meeting.",  # name not addressed
-            "I saw Sam at the gym yesterday.",
-            "Hey Samantha, hi",
-            "Hey, are you coming to dinner?",
-            "",
-        ):
-            self.assertIsNone(self.wake.strip(text), text)
-
-    def test_phrase_without_greeting_needs_none(self):
-        self.assertEqual(WakePhrase("jarvis").strip("Jarvis, what is my EMI?"), "What is my EMI?")
-
-    def test_custom_phrase(self):
-        wake = WakePhrase("hey computer")
-        self.assertEqual(wake.name, "computer")
-        self.assertEqual(wake.strip("Hey computer, lights on"), "Lights on")
-        self.assertIsNone(wake.strip("Computer, lights on"))  # the phrase has a greeting, so one is required
-
-    def test_sleep_commands(self):
-        self.assertTrue(is_sleep_command("That's all."))
-        self.assertTrue(is_sleep_command("Stop listening!"))
-        self.assertTrue(is_sleep_command("That's all, thanks."))
-        self.assertTrue(is_sleep_command("OK, thank you."))
-        self.assertTrue(is_sleep_command("No thanks"))
-        self.assertFalse(is_sleep_command("stop the timer"))
-        self.assertFalse(is_sleep_command("thanks, what is my EMI"))
-        self.assertFalse(is_sleep_command(""))
-
-
-class ConversationTests(unittest.TestCase):
-    def test_wake_debug_shows_what_was_heard(self):
-        source, _, _, _ = conversation(["Hay some, what is my EMI?"])
-        source.debug = True
-        _, out = quietly(source.next_utterance)
-        self.assertIn("no wake phrase in 'Hay some, what is my EMI?' (WAKE_DEBUG)", out)
-
-    def test_speech_without_wake_phrase_is_ignored_and_not_printed(self):
-        source, _, _, indicator = conversation(["Are you coming to dinner?"])
-        result, out = quietly(source.next_utterance)
-        self.assertEqual(result, "")
-        self.assertFalse(source.awake)
-        self.assertNotIn("dinner", out)
-        self.assertEqual(indicator.states, [IndicatorState.IDLE, IndicatorState.THINKING])
-
-    def test_wake_phrase_then_follow_ups_without_it(self):
-        source, capture, _, indicator = conversation(
-            ["Hey Sam, what is my EMI?", "And my monthly income?"]
-        )
-        self.assertEqual(quietly(source.next_utterance)[0], "What is my EMI?")
-        self.assertTrue(source.awake)
-        self.assertEqual(quietly(source.next_utterance)[0], "And my monthly income?")
-        self.assertEqual(capture.waits, [None, 30])  # asleep: wait forever; awake: conversation timeout
-        self.assertEqual(indicator.states[-2:], [IndicatorState.LISTENING, IndicatorState.THINKING])
-
-    def test_bare_wake_phrase_starts_listening(self):
-        source, _, _, _ = conversation(["Hey Sam!", "What is my EMI?"])
-        self.assertEqual(quietly(source.next_utterance)[0], "")
-        self.assertTrue(source.awake)
-        self.assertEqual(quietly(source.next_utterance)[0], "What is my EMI?")
-
-    def test_silence_ends_the_conversation(self):
-        source, _, _, _ = conversation(["Hey Sam, what is my EMI?"], seconds=(1, 0))
-        quietly(source.next_utterance)
-        result, out = quietly(source.next_utterance)
-        self.assertEqual(result, "")
-        self.assertFalse(source.awake)
-        self.assertIn("[SLEEP] no follow-up for 30 s", out)
-
-    def test_sleep_command_ends_the_conversation(self):
-        source, _, _, _ = conversation(["Hey Sam, what is my EMI?", "That's all, thanks."])
-        quietly(source.next_utterance)
-        source.transcriber.texts = ["That's all, thanks."]
-        self.assertEqual(quietly(source.next_utterance)[0], "")
-        self.assertFalse(source.awake)
-
-    def test_wake_phrase_with_stop_never_exits_the_app(self):
-        source, _, _, _ = conversation(["Hey Sam, stop."])
-        self.assertEqual(quietly(source.next_utterance)[0], "")
-        self.assertFalse(source.awake)
-
-    def test_muting_ends_the_conversation(self):
-        source, _, _, indicator = conversation(["Hey Sam, what is my EMI?"])
-        quietly(source.next_utterance)
-        source.mute.set_muted(True)
-        quietly(source.next_utterance)
-        self.assertFalse(source.awake)
-        self.assertIs(indicator.states[-1], IndicatorState.MUTED)
-
-    def test_only_the_start_of_long_speech_is_checked_while_asleep(self):
-        source, _, transcriber, _ = conversation(["We should book the tickets soon"], seconds=(10,))
-        quietly(source.next_utterance)
-        self.assertEqual(transcriber.lengths, [3.0])  # 3 s checked, the rest never transcribed
-
-    def test_long_request_is_transcribed_in_full_after_waking(self):
-        source, _, transcriber, _ = conversation(
-            ["Hey Sam, when does", "Hey Sam, when does my car insurance expire?"], seconds=(6,)
-        )
-        self.assertEqual(quietly(source.next_utterance)[0], "When does my car insurance expire?")
-        self.assertEqual(transcriber.lengths, [3.0, 6.0])
-
-    def test_without_wake_phrase_every_utterance_is_a_request(self):
+class MuteAndIndicatorTests(unittest.TestCase):
+    def test_every_utterance_is_a_request(self):
         indicator = RecordingIndicator()
         source = MicInput(FakeCapture(), FakeTranscriber(), SoftwareMuteSwitch(), indicator)
         self.assertEqual(quietly(source.next_utterance)[0], "what is my income")
         self.assertEqual(indicator.states, [IndicatorState.LISTENING, IndicatorState.THINKING])
 
 
-class MuteAndIndicatorTests(unittest.TestCase):
     def test_muted_mic_never_records(self):
         capture = FakeCapture()
         indicator = RecordingIndicator()

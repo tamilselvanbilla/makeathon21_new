@@ -32,6 +32,7 @@ Defaults marked **Pi / other** differ by platform. A Raspberry Pi is detected fr
 | `WHISPER_MODEL_SIZE` | `tiny.en` / `base.en` | `tiny.en`, `base.en`, `small.en`, ... Larger is more accurate and slower. Cache a new size with setup first (see [setup.md §8](setup.md#8-updating-and-changing-models)) |
 | `WHISPER_LANGUAGE` | `en` | Language code. Use a multilingual size (no `.en`) for other languages |
 | `WHISPER_BEAM_SIZE` | `1` / `5` | `1` is greedy decoding (fastest); `5` is more accurate |
+| `WHISPER_HOTWORDS` | `EMI PAN Aadhaar` | Words Whisper should favour; `DEFAULT_PLACE` is added automatically |
 | `WHISPER_THREADS` | cores | CPU threads for transcription |
 
 ## Microphone capture
@@ -39,7 +40,6 @@ Defaults marked **Pi / other** differ by platform. A Raspberry Pi is detected fr
 | Variable | Default | Description |
 |---|---|---|
 | `MIC_DEVICE` | *(automatic)* | Index or part of the name of the input device (`scripts/run.sh --list-mics`). Unset: the system default input, else the first USB/ReSpeaker/"mic" device that isn't a loopback or monitor |
-| `MIC_BACKEND` | `auto` | `auto`: on Linux, record with ALSA's `arecord` when the device has an ALSA hardware name (a separate C process with a 1 s buffer, so a busy Python can't make the sound card overrun), otherwise PortAudio. Force with `arecord` or `portaudio` |
 | `SPEECH_RMS_THRESHOLD` | `450` | Loudness that counts as speech (int16 RMS). Lower for quiet mics, higher for noisy rooms |
 | `SILENCE_SECONDS` | `0.8` | Silence that ends an utterance |
 | `MAX_RECORD_SECONDS` | `15` | Hard cap on one utterance |
@@ -73,6 +73,7 @@ the device's native rate and resampled.
 | `ONLINE_WEATHER` | `1` | `0` switches off weather lookups |
 | `ONLINE_MARKET` | `1` | `0` switches off share prices and fund NAVs; portfolio questions are then answered from the saved records |
 | `ONLINE_NEWS` | `1` | `0` switches off news headlines |
+| `ASSISTANT_NAME` | `Sam` | The assistant's name in the welcome message |
 | `DEFAULT_PLACE` | `Bengaluru` | Place used for weather questions that don't name one ("will it rain today?") |
 | `MARKET_SYMBOLS_FILE` | `knowledge_base/market_symbols.json` | Company and index names the assistant may look up, mapped to symbols |
 
@@ -98,32 +99,6 @@ Holdings come from `knowledge_base/personal_data.json`: a `stock` record needs `
 `knowledge_base/market_symbols.json` maps spoken names to symbols for companies you don't
 hold ("TCS" → `TCS.NS`) and lists the `indices` always fetched (Nifty 50, Sensex). Add
 entries to ask about more companies; the longest name is the one spoken in replies.
-
-## Wake phrase and conversation
-
-The wake phrase is spotted in Whisper's own transcripts, so no wake-word model is
-downloaded and there is no extra licence (Whisper and faster-whisper are MIT).
-
-| Variable | Default | Description |
-|---|---|---|
-| `WAKE_WORD` | `1` | `0` treats any speech as a request (same as `--no-wake-word`) |
-| `WAKE_PHRASE` | `hey sam` | Any phrase. With a greeting in the phrase, any greeting works ("Hey Sam", "Hi Sam", "OK Sam") but one is required; a phrase without one (`jarvis`) is accepted on its own |
-| `CONVERSATION_TIMEOUT` | `30` | Seconds of silence after a reply before it needs the wake phrase again |
-| `WAKE_DEBUG` | `0` | `1` prints what Whisper heard when speech is ignored, to diagnose a missed wake phrase. Off by default: ignored speech is otherwise never shown |
-| `WHISPER_HOTWORDS` | `EMI PAN Aadhaar` | Words Whisper should favour. The wake name and `DEFAULT_PLACE` are added automatically |
-
-**Choosing a wake phrase:** use a name Whisper spells consistently, i.e. real words
-or common names ("hey sam", "hey computer", "hello friday"). With a common name like
-Sam, keep the greeting in the phrase: then "Sam is coming for dinner" or "Hey, Sam
-called" don't wake the device, because the name must be greeted and addressed (followed
-by a pause or a request such as "what…", "remind…"). Invented names get
-spelled differently each time and won't match. Check yours with
-`scripts/run.sh --mic-test`, then
-`cd src && ../.venv/bin/python -m companion.audio.stt ../audio/test.wav`.
-
-**Ending a conversation:** "that's all", "stop listening", "go to sleep", "goodbye",
-"thank you" or "no thanks" put it back to sleep, as do 30 s of silence and the mute
-switch. By voice it never shuts down; `Ctrl+C` stops the program.
 
 ## Memory
 

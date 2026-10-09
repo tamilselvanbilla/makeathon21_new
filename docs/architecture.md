@@ -23,8 +23,7 @@ flowchart LR
         Mic[Microphone] -->|80 ms frames, 16 kHz, RAM only| Capture[capture.py<br/>record utterance]
         Mute[Mute switch] -.gates.-> Capture
         Capture --> STT[stt.py<br/>faster-whisper]
-        STT -->|text| Wake[wake.py<br/>wake phrase / sleep]
-        Wake -->|request| Router[router.py]
+        STT -->|text| Router[router.py]
         Router -->|local_reasoning| KB[knowledge.py<br/>personal records]
         KB --> LLM[llm.py<br/>Qwen3-0.6B via llama.cpp]
         Router -->|online_factual_lookup| Parse[parse_lookup<br/>place + day]
@@ -60,19 +59,10 @@ stateDiagram-v2
 
 1. **Mute check.** `MicInput` asks the `MuteSwitch`. If muted, the indicator shows
    `MUTED` and the microphone is never opened.
-2. **Capture.** The microphone stays open between utterances (closed only when muted), so
-   speech that starts while the previous utterance is being transcribed is not lost. On Linux the
-   audio comes from ALSA's `arecord` in a separate process (1 s buffer, `plughw` converts the mic to
-   16 kHz), so a busy Python can't make the sound card overrun; elsewhere PortAudio's audio thread
-   queues each block with a 0.5 s buffer. Audio heard while the assistant speaks is discarded.
-   `MicrophoneCapture.frames` streams 80 ms frames of 16 kHz audio
+2. **Capture.** `MicrophoneCapture.frames` streams 80 ms frames of 16 kHz audio
    (resampled if the mic can't do 16 kHz). `record_command` keeps audio once loudness
    passes `SPEECH_RMS_THRESHOLD` and stops after `SILENCE_SECONDS` of quiet. If the
    mute switch flips, the stream stops and the audio is discarded.
-   **Wake phrase:** while asleep (`IDLE`), only the first 3 s are transcribed; if the
-   text doesn't start with the wake phrase it is dropped. Once awake (`LISTENING`),
-   every utterance is a request until `CONVERSATION_TIMEOUT` seconds pass without
-   speech, a sleep phrase is said, or the device is muted (see *Wake phrase* below).
 3. **Transcribe.** `Transcriber` runs faster-whisper (int8, CPU) on the in-memory
    waveform. Its built-in voice-activity filter trims silence.
 4. **Route.** `router.route` returns `EXIT`, `ONLINE_LOOKUP` (weather, forecast, news,
@@ -114,7 +104,6 @@ continues, so an always-on device does not die on one bad request.
 | `companion/brain/policy.py` | What may go online; when to fall back | `is_allowed_cloud_lookup`, `require_local_answer` |
 | `companion/brain/knowledge.py` | Loads personal records and searches them (FTS5, owners, record-type focus) | `load_knowledge`, `KnowledgeBase`, `Match` |
 | `companion/brain/memory.py` | Notes, past exchanges, follow-ups, forgetting; SQLite on the device | `ConversationMemory`, `parse_memory_command`, `MemoryItem` |
-| `companion/brain/wake.py` | Wake phrase and sleep commands in transcripts | `WakePhrase`, `is_sleep_command` |
 | `companion/device/indicator.py` | Listening-light states | `IndicatorState`, `Indicator`, `ConsoleIndicator` |
 | `companion/device/mute.py` | Mute switch | `MuteSwitch`, `SoftwareMuteSwitch` |
 | `companion/device/tts.py` | Spoken output: espeak-ng + aplay on Linux (no sound server needed), pyttsx3 elsewhere | `Speaker`, `EspeakSpeaker`, `Pyttsx3Speaker`, `PrintSpeaker`, `make_speaker` |
@@ -208,30 +197,6 @@ or to an honest "not found".
 | Models never phone home | Whisper loads with `local_files_only=True` (without it, faster-whisper contacts huggingface.co at every start); the LLM and embedding models are plain local files; `run.sh` also sets `HF_HUB_OFFLINE=1` |
 | Online moments are visible | The indicator shows `ONLINE` only while the gateway is in use |
 
-## Wake phrase
-
-There is no wake-word model: `MicInput` transcribes speech with the same Whisper model
-used for requests, and `brain/wake.py` checks the text.
-
-```mermaid
-stateDiagram-v2
-    [*] --> Asleep
-    Asleep --> Asleep: speech without wake phrase (discarded)
-    Asleep --> Awake: "Hey Sam[, request]"
-    Awake --> Awake: request (no wake phrase needed)
-    Awake --> Asleep: CONVERSATION_TIMEOUT of silence
-    Awake --> Asleep: "that's all" / "stop listening" / "thank you"
-    Awake --> Asleep: mute switch
-```
-
-| Rule | Detail |
-|---|---|
-| Match | The transcript must **start** with a greeting and the name ("Hey Sam", "Hi Sam", "OK Sam"), and the name must be addressed: followed by a pause or a request word ("Hey Sam what's…"). "Sam is coming for dinner", "Hey, Sam called…" and "I saw Sam…" do not wake it |
-| Cost while asleep | Only the first `WAKE_CHECK_SECONDS` (3 s) of each utterance are transcribed; the full utterance is transcribed only after a match |
-| Accuracy | The wake check gives Whisper only the wake name as a hint ("Sam" is otherwise often heard as "sir"); a list of hint words gets echoed as speech on room noise ("my name is Sam EMI PAN"), and such echoes are dropped. Requests use the vocabulary hint (EMI, PAN, Aadhaar, default place). With `tiny.en` and added noise, "Hey Sam" was recognised 12/12, 12/12, 11/12 (clean, 20 dB, 10 dB SNR) with no false wakes |
-| Privacy | Ignored speech is transcribed in memory and discarded; its text is never printed, logged, or stored |
-| Never exits by voice | "Exit", "stop" and "goodbye" end the conversation; the program stops only with `Ctrl+C` |
-
 ## Pi 4 performance decisions
 
 | Decision | Reason |
@@ -246,7 +211,6 @@ stateDiagram-v2
 | Stages run sequentially | STT and LLM each get all four cores instead of competing |
 | Lazy imports | Text mode and tests run without audio libraries; startup loads only what is used |
 | Memory: FTS5 + int8 MiniLM embeddings, NumPy similarity, top 3 items | ~90 MB RAM and ~1 ms per question for 94% vs 79% paraphrase recall; no vector database; only relevant items reach the prompt |
-| Wake phrase via Whisper, first 3 s only | No extra model in RAM; room conversation costs one short `tiny.en` pass per utterance instead of a full transcription |
 
 ## Extension points
 
@@ -276,11 +240,6 @@ enforces the allowlist, caches, reuses stale data when offline, and is replaced 
 in tests), and return `LookupResult(source, text, data)`. Add an `ONLINE_<KIND>` switch in
 `config.py`. Keep all networking code in this file, send only `LookupRequest` fields, and
 do any computation on the result locally.
-
-### Different wake phrase
-
-Set `WAKE_PHRASE`; no download or training is needed. Sleep phrases and polite words
-are in `SLEEP_PHRASES` and `POLITE_WORDS` in `brain/wake.py`.
 
 ### New input source
 

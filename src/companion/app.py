@@ -8,7 +8,6 @@ from .brain.llm import LocalLLM
 from .brain.market import Portfolio
 from .brain.memory import ConversationMemory
 from .brain.prompts import build_welcome
-from .brain.wake import WakePhrase
 from .config import IS_RASPBERRY_PI, AppConfig
 from .device.indicator import ConsoleIndicator
 from .device.mute import SoftwareMuteSwitch
@@ -23,7 +22,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--text", action="store_true", help="type requests instead of speaking")
     parser.add_argument("--no-tts", action="store_true", help="print replies instead of speaking")
     parser.add_argument("--offline", action="store_true", help="disable all online lookups")
-    parser.add_argument("--no-wake-word", action="store_true", help="treat any speech as a request")
     return parser.parse_args(argv)
 
 
@@ -60,29 +58,11 @@ def main(argv: list[str] | None = None) -> None:
         from .audio.stt import Transcriber
 
         capture = MicrophoneCapture(config.capture, choose_input_device(config.capture.device))
-        via = f"arecord {capture.alsa_device}" if capture.backend == "arecord" else "PortAudio"
-        print(f"Microphone: {capture.device_name} at {capture.sample_rate} Hz via {via}")
+        print(f"Microphone: {capture.device_name} at {capture.sample_rate} Hz")
         print(f"Loading Whisper '{config.stt.model_size}' (beam {config.stt.beam_size})...")
-        wake = None
-        if config.wake_word.enabled and not args.no_wake_word:
-            wake = WakePhrase(config.wake_word.phrase)
-            print(
-                f"Wake phrase: '{wake.phrase}' (conversation stays open "
-                f"{config.wake_word.conversation_timeout:.0f} s after each reply)"
-            )
-        # Vocabulary for requests only; the wake check runs without hotwords (they get
-        # echoed on noise), and the wake name is not needed after waking.
         hotwords = " ".join(filter(None, [config.stt.hotwords, config.default_place]))
         transcriber = Transcriber(config.stt, hotwords=hotwords)
-        source = MicInput(
-            capture,
-            transcriber,
-            SoftwareMuteSwitch(),
-            indicator,
-            wake,
-            config.wake_word.conversation_timeout,
-            debug=config.wake_word.debug,
-        )
+        source = MicInput(capture, transcriber, SoftwareMuteSwitch(), indicator)
 
     speaker = PrintSpeaker() if args.text or args.no_tts or not config.tts_enabled else make_speaker()
     records = load_knowledge(config.knowledge.path)
@@ -96,7 +76,7 @@ def main(argv: list[str] | None = None) -> None:
     print(f"Online lookups: {', '.join(sorted(gateway.kinds)) or 'off'}")
     assistant = Assistant(
         llm=llm,
-        name=WakePhrase(config.wake_word.phrase).name.title(),  # "hey sam" -> "Sam"
+        name=config.assistant_name,
         knowledge=knowledge,
         gateway=gateway,
         portfolio=Portfolio.load(records, knowledge.primary_user, config.market_symbols_file),
@@ -115,14 +95,6 @@ def main(argv: list[str] | None = None) -> None:
 
     startup_ms = (time.perf_counter() - started_at) * 1000
     log_event("startup", duration_ms=startup_ms, raspberry_pi=IS_RASPBERRY_PI)
-    if args.text:
-        hint = "Type 'exit' to stop."
-    elif getattr(source, "wake", None):
-        hint = f"Say '{source.wake.phrase}' and your request; 'that's all' ends a conversation. Ctrl+C stops."
-    else:
-        hint = "Speak your request. Ctrl+C stops."
-    where = config.memory.path or "RAM only (MEMORY=0)"
-    print(f"Memory: {where}, kept {config.memory.retention_days} days")
+    hint = "Type 'exit' to stop." if args.text else "Speak your request. Ctrl+C stops."
     print(f"Ready in {startup_ms / 1000:.1f}s. {hint}")
-    wake = getattr(source, "wake", None)
-    assistant.run(source, welcome=build_welcome(assistant.name, knowledge.primary_user, wake.phrase if wake else None))
+    assistant.run(source, welcome=build_welcome(assistant.name, knowledge.primary_user))

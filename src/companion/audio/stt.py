@@ -17,14 +17,6 @@ def reliable(segment) -> bool:
     return segment.compression_ratio <= 2.4
 
 
-def echoes_prompt(text: str, hotwords: str | None) -> bool:
-    """On unclear audio Whisper repeats its prompt: with hotwords "Sam EMI PAN" it
-    produced "Hello, my name is Sam EMI PAN". Two hotwords in a row mean an echo."""
-    words = (hotwords or "").casefold().split()
-    lowered = " ".join(re.findall(r"[a-z0-9']+", text.casefold()))
-    return any(f" {a} {b} " in f" {lowered} " for a, b in zip(words, words[1:]))
-
-
 def looks_like_noise(text: str) -> bool:
     """Transcripts like "M.D. M.D. M.D. S.B. S.B. S.B." that Whisper invents from
     background noise: long but made of very few distinct words."""
@@ -34,7 +26,7 @@ def looks_like_noise(text: str) -> bool:
 
 class Transcriber:
     def __init__(self, config: STTConfig, hotwords: str | None = None):
-        """`hotwords` biases recognition towards app words (wake name, EMI, PAN),
+        """`hotwords` biases recognition towards app words (EMI, PAN, Aadhaar),
         which tiny.en otherwise mishears ("EMI" -> "UI")."""
         from faster_whisper import WhisperModel
 
@@ -58,10 +50,8 @@ class Transcriber:
                 f"(for another size: WHISPER_MODEL_SIZE={config.model_size} scripts/setup.sh --skip-system)."
             ) from None
 
-    def transcribe(self, audio: "np.ndarray | str", use_hotwords: bool = True, hotwords: str | None = None) -> str:
-        """Transcribe a 16 kHz float32 waveform or an audio file path. `hotwords`
-        replaces the default vocabulary for one call; the wake check passes only the
-        wake name, because a list of words gets echoed as speech on room noise."""
+    def transcribe(self, audio: "np.ndarray | str") -> str:
+        """Transcribe a 16 kHz float32 waveform or an audio file path."""
         if isinstance(audio, np.ndarray) and audio.size == 0:
             return ""
         with timed_event("stt", model=self.config.model_size):
@@ -70,10 +60,10 @@ class Transcriber:
                 beam_size=self.config.beam_size,
                 language=self.config.language,
                 vad_filter=True,
-                hotwords=(hotwords or self.hotwords) if use_hotwords else None,
+                hotwords=self.hotwords,
             )
             text = " ".join(segment.text.strip() for segment in segments if reliable(segment)).strip()
-        if looks_like_noise(text) or (use_hotwords and echoes_prompt(text, hotwords or self.hotwords)):
+        if looks_like_noise(text):
             print("[STT] unclear audio ignored")
             return ""
         return text

@@ -32,10 +32,9 @@ def build_system_prompt(
     )
 
 
-def build_welcome(assistant_name: str, primary_user: str, wake_phrase: str | None) -> str:
-    """Spoken once at start-up: who the assistant is, what it holds, how to start. Kept short."""
-    how = f"Say \"{wake_phrase.title()}\" to start." if wake_phrase else "Ask me anything."
-    return f"Hello {primary_user}, I'm {assistant_name}, your private assistant. {how}"
+def build_welcome(assistant_name: str, primary_user: str) -> str:
+    """Spoken once at start-up."""
+    return f"Hello {primary_user}, I'm {assistant_name}, your private assistant. Ask me anything."
 
 
 def build_user_prompt(question: str, knowledge: str, memory: str = "", earlier: str = "") -> str:

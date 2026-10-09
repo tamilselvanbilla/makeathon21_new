@@ -21,7 +21,6 @@ from .brain.policy import is_uncertain, require_local_answer
 from .brain.news import headlines_reply, is_news_question, news_request
 from .brain.prompts import NOT_IN_RECORDS_ANSWER, build_advice_prompt, build_system_prompt, build_user_prompt
 from .brain.router import Intent, extract_place, parse_lookup, route
-from .brain.wake import WakePhrase, is_sleep_command
 from .device.indicator import Indicator, IndicatorState
 from .device.mute import MuteSwitch
 from .device.tts import Speaker
@@ -29,10 +28,6 @@ from .online_gateway import LookupUnavailable, OnlineGateway
 from .telemetry import log_event
 
 MUTE_POLL_SECONDS = 0.1
-SAMPLE_RATE = 16_000
-# While asleep, only the start of each utterance is transcribed to look for the
-# wake phrase, which keeps the Pi's CPU free while people talk nearby.
-WAKE_CHECK_SECONDS = 3.0
 
 
 class ChatModel(Protocol):
@@ -44,7 +39,7 @@ class AudioCapture(Protocol):
 
 
 class SpeechToText(Protocol):
-    def transcribe(self, audio: np.ndarray, use_hotwords: bool = True, hotwords: str | None = None) -> str: ...
+    def transcribe(self, audio: np.ndarray) -> str: ...
 
 
 class InputSource(Protocol):
@@ -65,15 +60,7 @@ class TextInput:
 
 class MicInput:
     """Spoken requests, gated by the mute switch and shown on the indicator.
-
-    With a wake phrase, the device has two states:
-    - asleep (IDLE): speech is transcribed and kept only if it starts with the
-      wake phrase ("Hey Sam, what's my EMI?"); everything else is discarded.
-    - awake (LISTENING): a conversation. Follow-up requests need no wake phrase.
-      It goes back to sleep after `conversation_timeout` seconds without speech,
-      on a sleep command ("that's all", "stop listening"), or when muted.
-    Without a wake phrase, every utterance is a request.
-    """
+    Every utterance is treated as a request."""
 
     def __init__(
         self,
@@ -81,90 +68,29 @@ class MicInput:
         transcriber: SpeechToText,
         mute: MuteSwitch,
         indicator: Indicator,
-        wake: WakePhrase | None = None,
-        conversation_timeout: float = 30.0,
-        debug: bool = False,
     ):
-        self.debug = debug
         self.capture = capture
         self.transcriber = transcriber
         self.mute = mute
         self.indicator = indicator
-        self.wake = wake
-        self.conversation_timeout = conversation_timeout
-        self.awake = wake is None
-
-    def after_reply(self) -> None:
-        """The assistant just spoke: drop the audio of its own voice."""
-        discard = getattr(self.capture, "discard_pending", None)
-        if discard:
-            discard()
-
-    def _go_to_sleep(self, reason: str) -> None:
-        if self.wake and self.awake:
-            self.awake = False
-            print(f"[SLEEP] {reason}; say '{self.wake.phrase}' to start again.")
 
     def next_utterance(self) -> str | None:
         if self.mute.is_muted():
-            self._go_to_sleep("muted")
             self.indicator.show(IndicatorState.MUTED)
             time.sleep(MUTE_POLL_SECONDS)
             return ""
 
-        in_conversation = self.awake and self.wake is not None
-        self.indicator.show(IndicatorState.LISTENING if self.awake else IndicatorState.IDLE)
-        audio = self.capture.record_utterance(
-            should_abort=self.mute.is_muted,
-            max_wait_seconds=self.conversation_timeout if in_conversation else None,
-        )
+        self.indicator.show(IndicatorState.LISTENING)
+        audio = self.capture.record_utterance(should_abort=self.mute.is_muted)
         if not audio.size:
-            if in_conversation and not self.mute.is_muted():
-                self._go_to_sleep(f"no follow-up for {self.conversation_timeout:.0f} s")
+            self.indicator.show(IndicatorState.IDLE)
             return ""
 
         self.indicator.show(IndicatorState.THINKING)
-        if not self.awake:
-            return self._request_after_wake_phrase(audio)
-
         text = self.transcriber.transcribe(audio)
-        if not text:
-            return ""
-        print(f"You: {text}")
-        if self.wake:
-            # Saying the wake phrase again mid-conversation is fine.
-            stripped = self.wake.strip(text)
-            if stripped is not None:
-                text = stripped
-            if is_sleep_command(text):
-                self._go_to_sleep("conversation ended")
-                return ""
+        if text:
+            print(f"You: {text}")
         return text
-
-    def _request_after_wake_phrase(self, audio: np.ndarray) -> str:
-        head = audio[: int(WAKE_CHECK_SECONDS * SAMPLE_RATE)]
-        # Only the wake name as a hint: "Sam" is otherwise often heard as "sir". A lone
-        # hallucinated "Sam" can't wake the device, since a greeting must precede it.
-        heard = self.transcriber.transcribe(head, hotwords=self.wake.hotwords())
-        request = self.wake.strip(heard)
-        if request is None:
-            if self.debug:
-                print(f"[IDLE] speech ignored: no wake phrase in {heard!r} (WAKE_DEBUG)")
-            else:
-                print("[IDLE] speech ignored: no wake phrase (nothing kept)")
-            return ""
-        if audio.size > head.size:
-            # The request continued past the checked part: transcribe all of it.
-            full = self.wake.strip(self.transcriber.transcribe(audio))
-            request = full if full is not None else request
-
-        if is_sleep_command(request):
-            return ""
-        self.awake = True
-        print(f"[WAKE] '{self.wake.phrase}' heard; listening (follow-ups need no wake phrase)")
-        if request:
-            print(f"You: {request}")
-        return request
 
 
 class Assistant:
@@ -333,8 +259,5 @@ class Assistant:
 
             self.indicator.show(IndicatorState.SPEAKING)
             self.speaker.say(reply)
-            after_reply = getattr(source, "after_reply", None)
-            if after_reply:
-                after_reply()  # don't treat the assistant's own voice as the next request
             self.indicator.show(IndicatorState.IDLE)
 

@@ -227,23 +227,6 @@ part of its name, e.g. `MIC_DEVICE=USB scripts/run.sh`.
 | `--text` | Type requests instead of speaking |
 | `--no-tts` | Print replies instead of speaking |
 | `--offline` | Disable all online lookups |
-| `--no-wake-word` | Treat any speech as a request |
-
-### Wake phrase and conversation
-
-The console shows `[LED] IDLE` while the device waits for the wake phrase. Speech
-that doesn't start with it is dropped (`[IDLE] speech ignored`), and its text is never
-shown or kept.
-
-1. Say **"Hey Sam, what is my EMI?"** in one breath (or "Hey Sam", then the
-   question). You'll see `[WAKE] 'hey sam' heard` and `[LED] LISTENING`. Always use a
-   greeting ("Hey/Hi/OK Sam"): "Sam, …" alone is ignored so that conversations
-   *about* someone called Sam don't wake the device.
-2. Ask follow-ups **without** the wake phrase: "And when does my car insurance expire?"
-3. Say **"That's all, thanks"**, or stay quiet for 30 s: `[SLEEP] ...` and back to `IDLE`.
-
-If it doesn't wake, check what Whisper heard: run with `--no-wake-word` and look at the
-`You:` line. Pick a phrase it spells consistently (configuration.md, *Wake phrase*).
 
 ### Memory
 
@@ -432,8 +415,7 @@ not recommended.
 | The wrong microphone is selected | Set `MIC_DEVICE` to part of the right device's name, e.g. `MIC_DEVICE=USB` |
 | It never starts recording | Your mic is quiet: lower `SPEECH_RMS_THRESHOLD` (e.g. `200`) |
 | Every recording runs the full 15 s | Background noise never drops below the threshold: raise `SPEECH_RMS_THRESHOLD` (e.g. `800`) |
-| `Warning: microphone overflowed N time(s)` | Check the start-up line: on a Pi it should say `via arecord plughw:X,Y`, which records in a separate process with a 1 s buffer. If it says `via PortAudio`, the device has no ALSA hardware name; try `MIC_BACKEND=arecord`. If overruns continue, the Pi itself is overloaded: check `vcgencmd get_throttled` (0x0 = fine), cooling, the power supply, and that nothing else uses the microphone. No pip package is needed |
-| "Hey Sam" is not recognised | Run with `WAKE_DEBUG=1` to see what Whisper heard. If the name is misheard, speak closer to the mic or raise its level (`alsamixer`, F4 for capture); if every utterance is cut short, raise `SILENCE_SECONDS` (e.g. `1.2`) |
+| `microphone input overflowed` warnings | The CPU is overloaded: close other programs, check `vcgencmd get_throttled` |
 | `audio open error: Unknown error 524` | espeak-ng's own playback found no sound server. Update to this version (it plays through `aplay` instead) and set `AUDIO_OUTPUT_DEVICE=plughw:CARD=Headphones` for the 3.5 mm jack (section 4.5) |
 | `Speech output failed: aplay: ... No such file or directory` / `Device or resource busy` | Wrong device name, or a desktop sound server holds the card: check `scripts/run.sh --list-speakers`; on Pi OS Desktop use `AUDIO_OUTPUT_DEVICE=default` |
 | No spoken reply, no error | Audio is going to HDMI or is muted: set `AUDIO_OUTPUT_DEVICE` (section 4.5) and raise volume with `alsamixer` |

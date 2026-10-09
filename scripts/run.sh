@@ -6,7 +6,6 @@
 #   scripts/run.sh --text          type requests instead of speaking
 #   scripts/run.sh --no-tts        print replies instead of speaking
 #   scripts/run.sh --offline       disable all online lookups
-#   scripts/run.sh --no-wake-word  treat any speech as a request (no wake phrase)
 #   scripts/run.sh --list-mics     show microphone indexes for MIC_DEVICE
 #   scripts/run.sh --mic-test      record a 5-second clip to audio/test.wav
 #   scripts/run.sh --list-speakers show ALSA output devices for AUDIO_OUTPUT_DEVICE
