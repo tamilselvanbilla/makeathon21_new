@@ -1,10 +1,12 @@
 """Local GGUF language model, loaded once and shared by the whole pipeline."""
 
 import re
+import time
 from typing import TYPE_CHECKING
 
 from ..config import LLMConfig
 from ..telemetry import timed_event
+from ..tracing import annotate
 
 if TYPE_CHECKING:
     from llama_cpp import Llama
@@ -49,6 +51,7 @@ class LocalLLM:
         """Return one cleaned assistant reply for a system and user message."""
         max_tokens = max_tokens or self.config.max_tokens
         with timed_event("llm_generation", model=self.config.name, max_tokens=max_tokens):
+            started = time.perf_counter()
             response = self._llm.create_chat_completion(
                 messages=[
                     {"role": "system", "content": system},
@@ -58,6 +61,16 @@ class LocalLLM:
                 temperature=self.config.temperature,
                 top_p=0.95,
                 repeat_penalty=1.1,
+            )
+            usage = response.get("usage") or {}
+            seconds = time.perf_counter() - started
+            completion = usage.get("completion_tokens", 0)
+            annotate(
+                prompt_tokens=usage.get("prompt_tokens"),
+                completion_tokens=completion,
+                # Includes reading the prompt, so it is lower than pure generation speed.
+                tokens_per_s=round(completion / seconds, 1) if seconds > 0 and completion else None,
+                finish=response["choices"][0].get("finish_reason"),
             )
         return clean_model_response(str(response["choices"][0]["message"]["content"] or ""))
 

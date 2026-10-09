@@ -113,7 +113,9 @@ continues, so an always-on device does not die on one bad request.
 | `companion/online_gateway.py` | The only network exit: weather, market, news; validation, allowlist, cache, per-feature switches | `OnlineGateway`, `LookupRequest`, `LookupResult`, `LookupUnavailable` |
 | `companion/brain/market.py` | Portfolio: which symbols to fetch, all values and gains computed locally | `Portfolio`, `Holding` |
 | `companion/brain/news.py` | Which feeds to fetch; topic filtering on the device | `news_request`, `headlines_reply` |
-| `companion/telemetry.py` | JSON timing log without content | `log_event`, `timed_event` |
+| `companion/telemetry.py` | JSON timing log without content; each timed event is also a trace span | `log_event`, `timed_event` |
+| `companion/tracing.py` | Per-turn traces (spans, routes, token counts) in `data/traces.sqlite3`; console summary | `Tracer`, `span`, `annotate`, `set_turn` |
+| `companion/brain/schedule.py` | Dates and times in spoken notes | `parse_when`, `When` |
 
 ## Knowledge retrieval
 
@@ -206,6 +208,13 @@ or to an honest "not found".
 | Users can switch it off | `--offline` or `ONLINE_LOOKUPS=0` for everything; `ONLINE_WEATHER`, `ONLINE_MARKET`, `ONLINE_NEWS` per feature |
 | Models never phone home | Whisper loads with `local_files_only=True` (without it, faster-whisper contacts huggingface.co at every start); the LLM and embedding models are plain local files; `run.sh` also sets `HF_HUB_OFFLINE=1` |
 | Online moments are visible | The indicator shows `ONLINE` only while the gateway is in use |
+
+## Observability
+
+Each turn is a trace of timed spans (listen, stt, knowledge, memory, online_lookup,
+llm_generation, speak) with its route and reply time, stored on the device and shown on the
+console, by `scripts/traces.py`, and on a localhost dashboard. Record contents, prompts and
+audio are never traced. See [observability.md](observability.md).
 
 ## Pi 4 performance decisions
 

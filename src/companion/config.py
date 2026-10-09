@@ -124,6 +124,30 @@ class CaptureConfig:
 
 
 @dataclass(frozen=True)
+class TraceConfig:
+    enabled: bool
+    path: Path | None
+    content: bool
+    console: bool
+    retention_days: int
+
+    @classmethod
+    def from_env(cls) -> "TraceConfig":
+        return cls(
+            enabled=_env_bool("TRACING", True),
+            # With MEMORY=0 nothing is written to disk, traces included.
+            path=Path(os.getenv("TRACE_FILE", str(PROJECT_ROOT / "data" / "traces.sqlite3")))
+            if _env_bool("MEMORY", True)
+            else None,
+            # Store the question and reply text with each trace (on the device only).
+            content=_env_bool("TRACE_CONTENT", True),
+            # One [TRACE] line per turn on the console.
+            console=_env_bool("TRACE_CONSOLE", True),
+            retention_days=_env_int("TRACE_RETENTION_DAYS", 30),
+        )
+
+
+@dataclass(frozen=True)
 class MemoryConfig:
     path: Path | None
     retention_days: int
@@ -181,6 +205,7 @@ class AppConfig:
     capture: CaptureConfig
     knowledge: KnowledgeConfig
     memory: MemoryConfig
+    tracing: TraceConfig
     online_lookups_enabled: bool
     online_kinds: tuple[str, ...]
     market_symbols_file: Path
@@ -198,6 +223,7 @@ class AppConfig:
             capture=CaptureConfig.from_env(),
             knowledge=KnowledgeConfig.from_env(),
             memory=MemoryConfig.from_env(),
+            tracing=TraceConfig.from_env(),
             online_lookups_enabled=_env_bool("ONLINE_LOOKUPS", True),
             # Each online feature can be switched off on its own; ONLINE_LOOKUPS=0 disables all.
             online_kinds=tuple(

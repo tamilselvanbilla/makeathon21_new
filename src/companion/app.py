@@ -15,6 +15,7 @@ from .device.tts import PrintSpeaker, make_speaker
 from .online_gateway import OnlineGateway
 from .pipeline import Assistant, MicInput, TextInput
 from .telemetry import log_event
+from .tracing import Tracer
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -85,10 +86,22 @@ def main(argv: list[str] | None = None) -> None:
         home_country=config.home_country,
     )
     print(f"Online lookups: {', '.join(sorted(gateway.kinds)) or 'off'}")
+    traces = config.tracing
+    tracer = Tracer(
+        traces.path,
+        enabled=traces.enabled,
+        content=traces.content,
+        console=traces.console,
+        retention_days=traces.retention_days,
+    )
+    if traces.enabled:
+        where = traces.path or "RAM only"
+        print(f"Traces: {where} ({'with' if traces.content else 'without'} question text); view with scripts/traces.py")
     assistant = Assistant(
         llm=llm,
         name=config.assistant_name,
         debug_context=config.debug_context,
+        tracer=tracer,
         knowledge=knowledge,
         gateway=gateway,
         portfolio=Portfolio.load(records, knowledge.primary_user, config.market_symbols_file),

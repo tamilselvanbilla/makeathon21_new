@@ -156,6 +156,16 @@ ahead today.
 To inspect memory on the device: `sqlite3 data/memory.sqlite3 "SELECT created, kind, question, answer FROM memory"`
 and `sqlite3 data/memory.sqlite3 "SELECT * FROM schedule"`.
 
+## Tracing
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `TRACING` | `1` | Trace every turn (see [observability.md](observability.md)); `0` turns it off |
+| `TRACE_FILE` | `data/traces.sqlite3` | Trace store; RAM only when `MEMORY=0` |
+| `TRACE_CONTENT` | `1` | `0` keeps timings and routes but not the question and reply text |
+| `TRACE_CONSOLE` | `1` | `0` hides the `[TRACE]` line printed after each turn |
+| `TRACE_RETENTION_DAYS` | `30` | Older traces are deleted at startup |
+
 ## Set by `scripts/run.sh`
 
 | Variable | Value | Why |

@@ -45,6 +45,8 @@ from companion.online_gateway import (  # noqa: E402
     check_host_allowed,
 )
 from companion.pipeline import Assistant, MicInput  # noqa: E402
+from companion.telemetry import timed_event  # noqa: E402
+from companion.tracing import Tracer, annotate, span  # noqa: E402
 
 NETWORK_MODULES = {"requests", "httpx", "urllib3", "aiohttp", "socket", "http.client", "urllib.request"}
 
@@ -250,7 +252,7 @@ def make_portfolio():
     return Portfolio.load(HOLDINGS, "John", SYMBOLS_FILE)
 
 
-def make_assistant(llm=None, gateway=None, memory=None, portfolio=None):
+def make_assistant(llm=None, gateway=None, memory=None, portfolio=None, tracer=None):
     indicator = RecordingIndicator()
     speaker = FakeSpeaker()
     assistant = Assistant(
@@ -261,6 +263,7 @@ def make_assistant(llm=None, gateway=None, memory=None, portfolio=None):
         portfolio=portfolio,
         indicator=indicator,
         speaker=speaker,
+        tracer=tracer,
     )
     return assistant, indicator, speaker
 
@@ -867,6 +870,101 @@ class NoteAndScheduleTests(unittest.TestCase):
         self.say("forget that")
         self.clock.advance(minutes=5)
         self.assertEqual(self.assistant.due_announcement(), "")
+
+
+class TracingTests(unittest.TestCase):
+    def run_session(self, *lines, tracer=None, source=None, llm=None):
+        tracer = tracer or Tracer()
+        assistant, _, _ = make_assistant(llm=llm, memory=ConversationMemory(clock=Clock()), tracer=tracer)
+        quietly(assistant.run, source or ScriptedInput(*lines))
+        return tracer
+
+    def test_spans_outside_a_turn_do_nothing(self):
+        with span("stt") as current:
+            annotate(x=1)
+        self.assertIsNone(current)
+
+    def test_nested_spans_and_timed_events(self):
+        tracer = Tracer()
+        with quietly_turn(tracer):
+            with span("outer"):
+                with timed_event("llm_generation", model="m"):
+                    annotate(completion_tokens=5)
+        trace = tracer.get(tracer.recent(1)[0]["id"])
+        outer, inner = trace["spans"]
+        self.assertEqual((outer["name"], inner["name"], inner["parent"]), ("outer", "llm_generation", 0))
+        self.assertEqual(inner["attrs"], {"model": "m", "completion_tokens": 5})
+
+    def test_each_turn_is_traced_with_route_and_steps(self):
+        tracer = self.run_session("what is my monthly income", "Remember that I parked on level B2", "what is my blood group")
+        turns = list(reversed(tracer.recent()))
+        self.assertEqual([t["route"] for t in turns], ["llm", "memory_remember", "not_in_records"])
+        self.assertEqual(turns[0]["input"], "what is my monthly income")
+        self.assertEqual(turns[0]["reply"], "Your monthly income is 85000 rupees.")
+        names = [s["name"] for s in tracer.get(turns[0]["id"])["spans"]]
+        self.assertEqual(names, ["knowledge", "memory", "speak"])
+        self.assertIsNotNone(turns[0]["response_ms"])
+
+    def test_traces_name_records_but_never_contain_them(self):
+        tracer = self.run_session("what is my monthly income")
+        trace = tracer.get(tracer.recent(1)[0]["id"])
+        knowledge = trace["spans"][0]["attrs"]
+        self.assertGreaterEqual(knowledge["records"], 1)
+        self.assertIn("financial/John", knowledge["sources"])
+        self.assertNotIn("85000", json.dumps(trace["spans"]))
+
+    def test_question_text_can_be_left_out(self):
+        tracer = self.run_session("what is my monthly income", tracer=Tracer(content=False))
+        turn = tracer.recent(1)[0]
+        self.assertEqual((turn["input"], turn["reply"], turn["route"]), ("", "", "llm"))
+
+    def test_forget_everything_deletes_traces(self):
+        tracer = self.run_session("what is my monthly income", "forget everything")
+        self.assertEqual([t["route"] for t in tracer.recent()], ["memory_forget_all"])
+
+    def test_silent_timeouts_are_dropped_and_ignored_speech_kept(self):
+        class Limited:  # MicInput never ends by itself
+            def __init__(self, source, turns):
+                self.source, self.turns = source, turns
+
+            def next_utterance(self):
+                self.turns -= 1
+                return self.source.next_utterance() if self.turns >= 0 else None
+
+        mic = MicInput(FakeCapture(0, 1.0, 1.0), FakeTranscriber("A", "what is my monthly income"),
+                       SoftwareMuteSwitch(), RecordingIndicator())
+        tracer = self.run_session(source=Limited(mic, 3))
+        turns = tracer.recent()
+        self.assertEqual([t["route"] for t in turns], ["llm", "ignored"])  # the silent wait is dropped
+        self.assertEqual(turns[1]["attrs"]["ignored"], "too short")
+        self.assertEqual(turns[1]["input"], "")  # ignored speech is never stored
+        spans = [s["name"] for s in tracer.get(turns[0]["id"])["spans"]]
+        self.assertEqual(spans[0], "listen")
+        self.assertGreater(turns[0]["response_ms"], 0)
+
+    def test_turn_failure_is_recorded(self):
+        class Broken:
+            def chat(self, system, user):
+                raise RuntimeError("boom")
+        tracer = self.run_session("what is my monthly income", llm=Broken())
+        self.assertEqual(tracer.recent(1)[0]["status"], "error")
+
+    def test_persists_and_reports_stats(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "traces.sqlite3"
+            self.run_session("what is my monthly income", "what is my blood group", tracer=Tracer(path))
+            stats = Tracer(path).stats()
+            self.assertEqual(stats["turns"], 2)
+            self.assertEqual(stats["routes"], {"llm": 1, "not_in_records": 1})
+            self.assertEqual(stats["steps"]["speak"]["n"], 2)
+            out = subprocess.run([sys.executable, str(ROOT / "scripts" / "traces.py"), "--file", str(path), "show", "last"],
+                                 capture_output=True, text=True, check=True).stdout
+            self.assertIn("route=not_in_records", out)
+            self.assertIn("knowledge", out)
+
+
+def quietly_turn(tracer):
+    return tracer.turn()
 
 
 class MarketTests(unittest.TestCase):

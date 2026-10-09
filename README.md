@@ -87,6 +87,7 @@ the tests. For each step explained, manual installation, and troubleshooting, se
 | `scripts/run.sh --no-tts` | Voice in, printed replies out |
 | `scripts/run.sh --offline` | Disable every online lookup |
 | `scripts/run.sh --list-mics` | List audio devices and their indexes |
+| `.venv/bin/python scripts/traces.py serve` | Trace dashboard on http://127.0.0.1:8765 (also `list`, `show last`, `stats`); see [observability](docs/observability.md) |
 | `scripts/run.sh --mic-test` | Record 5 seconds to `audio/test.wav` |
 | `scripts/run.sh --list-speakers` | List audio outputs (Pi 4 aux jack: `plughw:CARD=Headphones`) |
 | `scripts/run.sh --speaker-test` | Speak a test phrase through the selected speaker |
@@ -123,10 +124,12 @@ docs/
   setup.md                        detailed installation, Pi notes, troubleshooting
   configuration.md                every environment variable
   architecture.md                 pipeline, modules, privacy boundary, extension points
+  observability.md                conversation traces: what is recorded, CLI, dashboard
 scripts/
   setup.sh                        one-time setup (Pi OS / Debian / macOS)
   run.sh                          start the assistant with model hubs forced offline
   mic_test.py                     record a test clip
+  traces.py                       view conversation traces: list, show, stats, serve (dashboard)
 src/
   main.py                         entry point
   companion/
@@ -135,6 +138,7 @@ src/
     pipeline.py                   turn loop, microphone and text input
     online_gateway.py             the ONLY module allowed network access
     telemetry.py                  JSON timing logs (no prompts or audio)
+    tracing.py                    per-turn traces stored on the device
     audio/   capture.py, stt.py
     brain/   llm.py, router.py, prompts.py, policy.py, knowledge.py, memory.py
     device/  indicator.py, mute.py, tts.py
@@ -160,7 +164,10 @@ tests/                            unit tests (run without models or audio hardwa
    erased on request ("forget that", "forget everything"). Audio and ignored speech are
    never stored; `MEMORY=0` keeps memory for the current session only.
 6. **Logs hold timings, not content.** `logs/assistant.log` records events and durations,
-   never prompts, transcripts, or audio.
+   never prompts, transcripts, or audio. Conversation traces (`data/traces.sqlite3`) add
+   routes, step timings and token counts, plus the question and reply text unless
+   `TRACE_CONTENT=0`; never record contents, prompts or audio. They stay on the device,
+   expire after 30 days and are erased by "forget everything".
 
 Points 2 and 3 are enforced by tests in `tests/test_privacy_and_control.py`.
 
@@ -171,6 +178,7 @@ Points 2 and 3 are enforced by tests in `tests/test_privacy_and_control.py`.
 | [docs/setup.md](docs/setup.md) | Install on a Pi or laptop, step by step, and fix problems |
 | [docs/configuration.md](docs/configuration.md) | Tune models, microphone sensitivity, or performance |
 | [docs/architecture.md](docs/architecture.md) | Understand the pipeline or add a feature |
+| [docs/observability.md](docs/observability.md) | See why a reply was slow or how it was answered: per-turn traces, CLI and dashboard |
 | [docs/benchmarks.md](docs/benchmarks.md) | See how the language and memory models were chosen, and re-run the benchmarks on the Pi |
 
 ## Roadmap

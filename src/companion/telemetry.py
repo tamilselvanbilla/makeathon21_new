@@ -5,6 +5,7 @@ import time
 from typing import Any
 
 from .config import PROJECT_ROOT
+from .tracing import span
 
 LOG_DIR = PROJECT_ROOT / "logs"
 LOG_PATH = LOG_DIR / "assistant.log"
@@ -26,7 +27,8 @@ def log_event(event: str, *, duration_ms: float | None = None, **details: Any) -
 
 
 def timed_event(event: str, **details: Any):
-    """Context manager that logs elapsed time and status."""
+    """Context manager that logs elapsed time and status, and traces it as a span
+    of the current conversation turn (see tracing.py)."""
     return _TimedEvent(event, details)
 
 
@@ -35,11 +37,14 @@ class _TimedEvent:
         self.event = event
         self.details = details
         self.started_at = time.perf_counter()
+        self._span = span(event, **details)
 
     def __enter__(self):
+        self._span.__enter__()
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        self._span.__exit__(exc_type, exc_value, traceback)
         duration_ms = (time.perf_counter() - self.started_at) * 1000
         status = "error" if exc_type is not None else "ok"
         self.details["status"] = status

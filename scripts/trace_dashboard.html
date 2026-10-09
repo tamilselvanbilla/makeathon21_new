@@ -1,0 +1,214 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sam Traces</title>
+<style>
+  :root {
+    --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #667085; --line: #e4e7ec;
+    --accent: #3b6fd8; --ok: #1f9d55; --warn: #c27c0e; --err: #d64545; --bar: #3b6fd8; --bar-soft: #c9d8f6;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #12151b; --panel: #1a1f27; --text: #e6e9ef; --muted: #98a2b3; --line: #2a313c;
+      --accent: #7aa2f7; --ok: #4cc38a; --warn: #e5a83b; --err: #f27474; --bar: #7aa2f7; --bar-soft: #2c3b5a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #12151b; --panel: #1a1f27; --text: #e6e9ef; --muted: #98a2b3; --line: #2a313c;
+    --accent: #7aa2f7; --ok: #4cc38a; --warn: #e5a83b; --err: #f27474; --bar: #7aa2f7; --bar-soft: #2c3b5a;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid var(--line); background: var(--panel); }
+  h1 { font-size: 17px; margin: 0; }
+  h1 small { color: var(--muted); font-weight: normal; margin-left: 6px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 0 0 10px; }
+  .controls { display: flex; gap: 10px; align-items: center; color: var(--muted); }
+  select, button { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; }
+  main { padding: 16px; display: grid; gap: 16px; max-width: 1400px; margin: 0 auto; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+  .card, .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 14px; }
+  .card .value { font-size: 22px; font-weight: 600; }
+  .card .label { color: var(--muted); font-size: 12px; }
+  .split { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 16px; }
+  .two { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  @media (max-width: 900px) { .split, .two { grid-template-columns: 1fr; } }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .turns { max-height: 560px; overflow-y: auto; }
+  .turns tr { cursor: pointer; }
+  .turns tr:hover td { background: color-mix(in srgb, var(--accent) 7%, transparent); }
+  .turns tr.selected td { background: color-mix(in srgb, var(--accent) 15%, transparent); }
+  td.time { white-space: nowrap; }
+  .q { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+  .pill { display: inline-block; padding: 1px 7px; border-radius: 99px; font-size: 12px; background: var(--bar-soft); color: var(--text); white-space: nowrap; }
+  .status-error { color: var(--err); font-weight: 600; }
+  .muted { color: var(--muted); }
+  .bubble { padding: 8px 10px; border-radius: 8px; margin: 6px 0; background: var(--bg); }
+  .bubble b { color: var(--muted); font-weight: 500; margin-right: 6px; }
+  .waterfall { margin-top: 12px; display: grid; gap: 4px; }
+  .row { display: grid; grid-template-columns: 150px 1fr 64px; gap: 8px; align-items: center; }
+  .row .name { font-family: var(--mono); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .track { position: relative; height: 16px; background: var(--bg); border-radius: 4px; }
+  .seg { position: absolute; top: 2px; height: 12px; min-width: 2px; border-radius: 3px; background: var(--bar); }
+  .seg.error { background: var(--err); }
+  .seg.listen { background: var(--bar-soft); }
+  .attrs { grid-column: 1 / -1; font-family: var(--mono); font-size: 11px; color: var(--muted); margin: -2px 0 4px 0; word-break: break-word; }
+  .hbar { display: grid; grid-template-columns: 130px 1fr 40px; gap: 8px; align-items: center; margin: 4px 0; }
+  .hbar .fill { height: 10px; border-radius: 3px; background: var(--bar); }
+  .empty { color: var(--muted); padding: 20px 0; text-align: center; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Sam traces <small>on-device conversation observability</small></h1>
+  <div class="controls">
+    <label>Window
+      <select id="hours">
+        <option value="1">1 hour</option>
+        <option value="24" selected>24 hours</option>
+        <option value="168">7 days</option>
+        <option value="0">All</option>
+      </select>
+    </label>
+    <label><input type="checkbox" id="auto" checked> Auto-refresh</label>
+    <button id="theme" title="Toggle theme">◐</button>
+  </div>
+</header>
+<main>
+  <section class="cards" id="cards"></section>
+  <section class="split">
+    <div class="panel">
+      <h2>Turns</h2>
+      <div class="turns"><table><thead><tr><th>Time</th><th>Route</th><th class="num">Reply after</th><th>Question</th></tr></thead><tbody id="turns"></tbody></table></div>
+    </div>
+    <div class="panel" id="detail"><h2>Trace</h2><div class="empty">Select a turn to see its steps.</div></div>
+  </section>
+  <section class="two">
+    <div class="panel"><h2>Routes</h2><div id="routes"></div></div>
+    <div class="panel"><h2>Step latency</h2>
+      <table><thead><tr><th>Step</th><th class="num">Count</th><th class="num">Median</th><th class="num">p95</th><th class="num">Worst</th></tr></thead><tbody id="steps"></tbody></table>
+    </div>
+  </section>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+let selected = null;
+
+function el(tag, props = {}, ...children) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(props)) {
+    if (key === "class") node.className = value; else if (key === "style") node.style.cssText = value; else node[key] = value;
+  }
+  for (const child of children) node.append(child instanceof Node ? child : document.createTextNode(child ?? ""));
+  return node;
+}
+const secs = (ms) => ms == null ? "–" : ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
+const time = (iso) => iso.replace("T", " ").slice(5, 19);
+const getJSON = async (url) => (await fetch(url)).json();
+
+async function refresh() {
+  const hours = $("hours").value;
+  const [stats, turns] = await Promise.all([getJSON(`/api/stats?hours=${hours}`), getJSON("/api/traces?limit=100")]);
+  renderCards(stats);
+  renderTurns(turns);
+  if (!selected && turns.length) selected = turns[0].id;  // open the newest turn
+  renderRoutes(stats);
+  renderSteps(stats);
+  if (selected) showTrace(selected, false);
+}
+
+function renderCards(stats) {
+  const r = stats.response_ms, llm = stats.llm;
+  const errors = stats.statuses.error || 0;
+  const cards = [
+    ["Turns", stats.turns],
+    ["Median reply time", secs(r.p50)],
+    ["p95 reply time", secs(r.p95)],
+    ["LLM calls", llm.calls],
+    ["LLM tok/s overall (median)", llm.tokens_per_s.p50 ? `${llm.tokens_per_s.p50} tok/s` : "–"],
+    ["Prompt tokens (median)", llm.prompt_tokens.p50 ?? "–"],
+    ["Errors", errors],
+  ];
+  $("cards").replaceChildren(...cards.map(([label, value]) =>
+    el("div", { class: "card" }, el("div", { class: "value" + (label === "Errors" && errors ? " status-error" : "") }, String(value)), el("div", { class: "label" }, label))));
+}
+
+function renderTurns(turns) {
+  if (!turns.length) { $("turns").replaceChildren(el("tr", {}, el("td", { colSpan: 4, class: "empty" }, "No traces yet."))); return; }
+  $("turns").replaceChildren(...turns.map((t) => {
+    const row = el("tr", { class: t.id === selected ? "selected" : "" },
+      el("td", { class: "muted time" }, time(t.started)),
+      el("td", {}, el("span", { class: "pill" }, t.route || "–")),
+      el("td", { class: "num" + (t.status === "error" ? " status-error" : "") }, secs(t.response_ms)),
+      el("td", { class: "q", title: t.input || "" }, t.input || el("span", { class: "muted" }, "(no text)")));
+    row.dataset.id = t.id;
+    row.onclick = () => showTrace(t.id, true);
+    return row;
+  }));
+}
+
+async function showTrace(id, scroll) {
+  selected = id;
+  const t = await getJSON(`/api/traces/${id}`);
+  if (t.error) return;
+  const total = Math.max(t.total_ms || 1, 1);
+  const depth = {};
+  const rows = [];
+  for (const s of t.spans) {
+    depth[s.seq] = s.parent == null ? 0 : (depth[s.parent] ?? 0) + 1;
+    const left = (s.start_ms / total) * 100, width = Math.max((s.duration_ms / total) * 100, 0.3);
+    const attrs = Object.entries(s.attrs).map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join("  ");
+    rows.push(el("div", { class: "row" },
+      el("div", { class: "name", title: s.name, style: `padding-left:${depth[s.seq] * 14}px` }, s.name),
+      el("div", { class: "track" }, el("div", { class: `seg ${s.status !== "ok" ? "error" : ""} ${s.name === "listen" ? "listen" : ""}`, style: `left:${left}%;width:${width}%` })),
+      el("div", { class: "num muted" }, secs(s.duration_ms))));
+    if (attrs) rows.push(el("div", { class: "attrs" }, attrs));
+  }
+  const meta = Object.entries(t.attrs).map(([k, v]) => `${k}=${typeof v === "object" ? JSON.stringify(v) : v}`).join("  ");
+  $("detail").replaceChildren(
+    el("h2", {}, `Trace ${t.id}`),
+    el("div", { class: "muted" }, `${t.started.replace("T", " ")} · route `, el("span", { class: "pill" }, t.route || "–"),
+      ` · reply after ${secs(t.response_ms)} · total ${secs(t.total_ms)} · `, el("span", { class: t.status === "error" ? "status-error" : "" }, t.status)),
+    t.input ? el("div", { class: "bubble" }, el("b", {}, "You"), t.input) : "",
+    t.reply ? el("div", { class: "bubble" }, el("b", {}, "Sam"), t.reply) : "",
+    meta ? el("div", { class: "attrs", style: "margin-top:6px" }, meta) : "",
+    el("div", { class: "waterfall" }, ...rows));
+  document.querySelectorAll("#turns tr").forEach((row) => row.classList.toggle("selected", row.dataset.id === id));
+  if (scroll) $("detail").scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function renderRoutes(stats) {
+  const entries = Object.entries(stats.routes);
+  if (!entries.length) { $("routes").replaceChildren(el("div", { class: "empty" }, "No turns in this window.")); return; }
+  const max = Math.max(...entries.map(([, n]) => n));
+  $("routes").replaceChildren(...entries.map(([route, n]) => el("div", { class: "hbar" },
+    el("span", { class: "pill" }, route), el("div", {}, el("div", { class: "fill", style: `width:${(n / max) * 100}%` })), el("span", { class: "num" }, String(n)))));
+}
+
+function renderSteps(stats) {
+  const order = ["listen", "stt", "knowledge", "memory", "schedule", "online_lookup", "llm_generation", "speak"];
+  const names = Object.keys(stats.steps).sort((a, b) => (order.indexOf(a) + 1 || 99) - (order.indexOf(b) + 1 || 99));
+  $("steps").replaceChildren(...names.map((name) => {
+    const p = stats.steps[name];
+    return el("tr", {}, el("td", { style: "font-family:var(--mono)" }, name), el("td", { class: "num" }, String(p.n)),
+      el("td", { class: "num" }, secs(p.p50)), el("td", { class: "num" }, secs(p.p95)), el("td", { class: "num" }, secs(p.max)));
+  }));
+}
+
+$("hours").onchange = refresh;
+$("theme").onclick = () => {
+  const dark = matchMedia("(prefers-color-scheme: dark)").matches;
+  const current = document.documentElement.dataset.theme || (dark ? "dark" : "light");
+  document.documentElement.dataset.theme = current === "dark" ? "light" : "dark";
+};
+setInterval(() => { if ($("auto").checked) refresh(); }, 5000);
+refresh();
+</script>
+</body>
+</html>
