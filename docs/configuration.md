@@ -1,0 +1,95 @@
+# Configuration Reference
+
+All settings are environment variables read at startup, so you can change models
+and tuning without editing code. Set them per run:
+
+```bash
+WHISPER_MODEL_SIZE=base.en LLM_MAX_TOKENS=96 scripts/run.sh
+```
+
+or persistently in `~/.bashrc` (`export MIC_DEVICE=1`).
+
+Defaults marked **Pi / other** differ by platform. A Raspberry Pi is detected from
+`/proc/device-tree/model`. "Cores" means the number of CPU cores (4 on a Pi 4).
+
+## Language model
+
+| Variable | Default | Description |
+|---|---|---|
+| `LLM_MODEL_PATH` | `models/llm/Qwen3-0.6B-Q4_K_M.gguf` | Path to the GGUF model file |
+| `LLM_MODEL` | `Qwen3-0.6B-Q4_K_M` | Display name used in logs |
+| `LLM_CHAT_FORMAT` | `chatml` | llama-cpp-python chat format. Qwen uses `chatml`; use `llama-3` for Llama 3.x and `gemma` for Gemma |
+| `LLM_CONTEXT` | `2048` | Context window in tokens. Each 1024 tokens costs about 115 MB of RAM with Qwen3-0.6B |
+| `LLM_THREADS` | cores | CPU threads for generation |
+| `LLM_BATCH` | `256` | Prompt-processing batch size |
+| `LLM_MAX_TOKENS` | `128` | Maximum reply length. The main lever on reply time on a Pi |
+| `LLM_TEMPERATURE` | `0.2` | Lower means more factual and repeatable |
+
+## Speech recognition (faster-whisper)
+
+| Variable | Default (Pi / other) | Description |
+|---|---|---|
+| `WHISPER_MODEL_SIZE` | `tiny.en` / `base.en` | `tiny.en`, `base.en`, `small.en`, ... Larger is more accurate and slower. Cache a new size with setup first (see [setup.md §8](setup.md#8-updating-and-changing-models)) |
+| `WHISPER_LANGUAGE` | `en` | Language code. Use a multilingual size (no `.en`) for other languages |
+| `WHISPER_BEAM_SIZE` | `1` / `5` | `1` is greedy decoding (fastest); `5` is more accurate |
+| `WHISPER_THREADS` | cores | CPU threads for transcription |
+
+## Microphone capture
+
+| Variable | Default | Description |
+|---|---|---|
+| `MIC_DEVICE` | *(prompt, or system default when headless)* | Input device index from `scripts/run.sh --list-mics` |
+| `SPEECH_RMS_THRESHOLD` | `450` | Loudness that counts as speech (int16 RMS). Lower for quiet mics, higher for noisy rooms |
+| `SILENCE_SECONDS` | `0.8` | Silence that ends an utterance |
+| `MAX_RECORD_SECONDS` | `15` | Hard cap on one utterance |
+| `MAX_WAIT_FOR_SPEECH_SECONDS` | `30` | How long one listening window waits for speech before restarting |
+
+Audio is captured at 16 kHz when the device supports it; otherwise it is captured at
+the device's native rate and resampled.
+
+### Tuning the threshold
+
+1. Run `scripts/run.sh --mic-test` in a quiet room, then while speaking normally.
+2. If speech is not detected, halve `SPEECH_RMS_THRESHOLD`; if room noise triggers
+   recording, double it.
+
+## Speech output
+
+| Variable | Default | Description |
+|---|---|---|
+| `TTS_ENABLED` | `1` | `0` prints replies instead of speaking (same as `--no-tts`) |
+| `TTS_RATE` | `150` | Words per minute |
+| `TTS_VOLUME` | `1.0` | 0.0 to 1.0 |
+| `TTS_VOICE` | *(system default)* | pyttsx3 voice id |
+
+## Online lookups
+
+| Variable | Default | Description |
+|---|---|---|
+| `ONLINE_LOOKUPS` | `1` | `0` disables the online gateway entirely (same as `--offline`) |
+
+## Set by `scripts/run.sh`
+
+| Variable | Value | Why |
+|---|---|---|
+| `HF_HUB_OFFLINE` | `1` | Model libraries may only read the local cache |
+| `TRANSFORMERS_OFFLINE` | `1` | Same, for any transformers-based component |
+| `HF_HUB_DISABLE_TELEMETRY` | `1` | No usage reporting |
+
+## Personal data
+
+The assistant answers personal questions from `knowledge_base/personal_data.json`,
+which has four lists: `financial`, `medical`, `documents`, `history`. Each entry is a
+JSON object; its `owner` and `source` fields are left out of the text given to the model. Edit
+the file and restart the assistant to pick up changes. Use synthetic data only for
+demos.
+
+## Recommended Pi 4 profiles
+
+All profiles fit comfortably in a 4 GB Pi 4.
+
+| Goal | Settings | Approx. peak memory |
+|---|---|---|
+| Fastest replies | `WHISPER_MODEL_SIZE=tiny.en LLM_MAX_TOKENS=80 LLM_CONTEXT=1024` | ~1.0 GB |
+| Balanced *(default)* | no overrides | ~1.1 GB |
+| Better transcription | `WHISPER_MODEL_SIZE=base.en` (more accurate, slower to transcribe) | ~1.2 GB |
