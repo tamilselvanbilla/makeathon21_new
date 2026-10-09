@@ -14,10 +14,37 @@
 # Settings can be overridden per run, e.g. MIC_DEVICE=1 scripts/run.sh
 # (see docs/configuration.md for all variables).
 
-set -euo pipefail
+# Re-run under bash when started as `sh scripts/<name>.sh` (/bin/sh is dash
+# on Raspberry Pi OS and does not support the bash features used below).
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+set -euo pipefail
+# A CDPATH from the user's profile makes `cd` print paths into $(...) results.
+unset CDPATH
+
+# Repository root: independent of the current directory and of symlinks that
+# point at this script. Set COMPANION_ROOT to override.
+resolve_root() {
+  local source="${BASH_SOURCE[0]}" dir
+  while [ -L "$source" ]; do
+    dir="$(cd -P "$(dirname "$source")" >/dev/null && pwd)"
+    source="$(readlink "$source")"
+    case "$source" in /*) ;; *) source="$dir/$source" ;; esac
+  done
+  cd -P "$(dirname "$source")/.." >/dev/null && pwd
+}
+ROOT="${COMPANION_ROOT:-$(resolve_root)}"
+if [ ! -f "$ROOT/src/main.py" ]; then
+  echo "Could not find the project root (looked in: $ROOT)." >&2
+  echo "Run the script from inside the repository, or set COMPANION_ROOT=/path/to/repo." >&2
+  exit 1
+fi
+cd "$ROOT"
 PY="$ROOT/.venv/bin/python"
+
+if [ "$(id -u)" = 0 ]; then
+  echo "Warning: running as root; the Whisper model cached by setup.sh for your user will not be found." >&2
+fi
 
 if [ ! -x "$PY" ]; then
   echo "No .venv found. Run scripts/setup.sh first." >&2

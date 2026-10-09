@@ -7,9 +7,41 @@
 # After this finishes, every model is cached locally and scripts/run.sh
 # starts the assistant with all model hubs forced offline.
 
-set -euo pipefail
+# Re-run under bash when started as `sh scripts/<name>.sh` (/bin/sh is dash
+# on Raspberry Pi OS and does not support the bash features used below).
+if [ -z "${BASH_VERSION:-}" ]; then exec bash "$0" "$@"; fi
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+set -euo pipefail
+# A CDPATH from the user's profile makes `cd` print paths into $(...) results.
+unset CDPATH
+
+# Repository root: independent of the current directory and of symlinks that
+# point at this script. Set COMPANION_ROOT to override.
+resolve_root() {
+  local source="${BASH_SOURCE[0]}" dir
+  while [ -L "$source" ]; do
+    dir="$(cd -P "$(dirname "$source")" >/dev/null && pwd)"
+    source="$(readlink "$source")"
+    case "$source" in /*) ;; *) source="$dir/$source" ;; esac
+  done
+  cd -P "$(dirname "$source")/.." >/dev/null && pwd
+}
+ROOT="${COMPANION_ROOT:-$(resolve_root)}"
+if [ ! -f "$ROOT/src/main.py" ]; then
+  echo "Could not find the project root (looked in: $ROOT)." >&2
+  echo "Run the script from inside the repository, or set COMPANION_ROOT=/path/to/repo." >&2
+  exit 1
+fi
+cd "$ROOT"
+
+# Running as root would put .venv and the Whisper cache under root's HOME,
+# where run.sh (as your normal user) cannot use them. sudo is called only
+# for apt below.
+if [ "$(id -u)" = 0 ] && [ "${ALLOW_ROOT:-0}" != 1 ]; then
+  echo "Do not run setup with sudo; run it as your normal user: scripts/setup.sh" >&2
+  exit 1
+fi
+
 VENV="$ROOT/.venv"
 MODEL_DIR="$ROOT/models/llm"
 MODEL_FILE="Qwen3-0.6B-Q4_K_M.gguf"
