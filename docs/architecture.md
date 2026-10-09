@@ -70,14 +70,17 @@ stateDiagram-v2
 5. **Look up (optional).** `OnlineGateway.lookup` validates the query and calls a
    provider. If it cannot, the assistant says so and stops; it never lets the model
    guess real-time facts.
-6. **Reason locally.** `find_relevant_records` selects matching personal records as
-   readable text; `LocalLLM.chat` answers with the system prompt, question, records,
-   and any online facts.
-7. **Check.** `require_local_answer` replaces empty or uncertain answers with an honest
+6. **Retrieve.** `KnowledgeBase.search` finds personal records (details below). If
+   the question is personal ("my", "I", or a family member's name) and nothing
+   matches, the assistant answers "I couldn't find that in your personal records"
+   without calling the model.
+7. **Reason locally.** `LocalLLM.chat` answers from the system prompt, question,
+   owner-labelled records, and any online facts.
+8. **Check.** `require_local_answer` replaces empty or uncertain answers with an honest
    fallback message.
-8. **Speak.** The `Speaker` says the reply; the indicator returns to `IDLE`.
+9. **Speak.** The `Speaker` says the reply; the indicator returns to `IDLE`.
 
-Any exception during steps 4–7 is logged, the user hears an apology, and the loop
+Any exception during steps 4–8 is logged, the user hears an apology, and the loop
 continues, so an always-on device does not die on one bad request.
 
 ## Modules
@@ -94,12 +97,32 @@ continues, so an always-on device does not die on one bad request.
 | `companion/brain/router.py` | Intent decision | `Intent`, `route` |
 | `companion/brain/prompts.py` | System prompt and prompt assembly | `SYSTEM_PROMPT`, `build_user_prompt` |
 | `companion/brain/policy.py` | What may go online; when to fall back | `is_allowed_cloud_lookup`, `require_local_answer` |
-| `companion/brain/knowledge.py` | Loads and searches personal records | `load_knowledge`, `find_relevant_records` |
+| `companion/brain/knowledge.py` | Loads personal records and searches them (FTS5, owners, record-type focus) | `load_knowledge`, `KnowledgeBase`, `Match` |
 | `companion/device/indicator.py` | Listening-light states | `IndicatorState`, `Indicator`, `ConsoleIndicator` |
 | `companion/device/mute.py` | Mute switch | `MuteSwitch`, `SoftwareMuteSwitch` |
 | `companion/device/tts.py` | Spoken output: espeak-ng + aplay on Linux (no sound server needed), pyttsx3 elsewhere | `Speaker`, `EspeakSpeaker`, `Pyttsx3Speaker`, `PrintSpeaker`, `make_speaker` |
 | `companion/online_gateway.py` | The only network exit | `OnlineGateway`, `LookupResult`, `LookupUnavailable` |
 | `companion/telemetry.py` | JSON timing log without content | `log_event`, `timed_event` |
+
+## Knowledge retrieval
+
+`KnowledgeBase` indexes `knowledge_base/personal_data.json` once at startup in an
+in-memory SQLite FTS5 table (built into Python, no extra RAM-heavy model). For each
+question:
+
+| Stage | What it does | Example |
+|---|---|---|
+| Terms | Drops filler words, adds synonyms from `SYNONYMS` | "EMI" → emi, installment, loan |
+| Match | Porter-stemmed full-text search, BM25-ranked | "loans" finds "Home Loan" |
+| Owner filter | "my"/"I" means the primary user (most frequent owner, or `PRIMARY_USER`); other people only when named (relation or name); "family" covers everyone; shared "family" records are always included | "my income" never returns the wife's salary |
+| Type focus | If a word names a record type, keep only that type | "passport" → passport record only |
+| Attribute check | If the question asks for an attribute (expiry, earnings, EMI…) that none of the selected records contain, return nothing | "when does my passport expire" → "not in your records", not a guessed date |
+| Top-k | Keep at most `KNOWLEDGE_TOP_K` records (default 4) | Short prompts on the Pi |
+| Format | One line per record, labelled with category and owner, plus a note mapping synonyms | "Financial record of John's wife: …" |
+
+The system prompt names the primary user, tells the model to address them as "you",
+states the currency (`CURRENCY`, default INR), and includes a one-line example answer,
+which a 0.6B model follows more reliably than rules.
 
 ## The online/offline boundary
 
@@ -170,7 +193,6 @@ models, only configuration changes are needed (see [configuration.md](configurat
 | No wake word; any speech above the threshold is treated as a request | openWakeWord as an input stage before capture |
 | Mute switch and LED are software/console only | GPIO drivers (interfaces are ready) |
 | Online gateway has no providers, so lookups are refused | Open-Meteo weather first |
-| Keyword retrieval misses plurals and synonyms ("loans" vs "loan") | SQLite FTS5 with stemming |
 | Fallback check flags any answer containing "can't" | Fall back on signals (empty retrieval, out-of-scope intent) instead of keywords |
 | Router is keyword-based | Grammar-constrained LLM intent output |
 | espeak-ng voice is robotic | Piper TTS (same aplay output path) |

@@ -158,7 +158,7 @@ Points 2 and 3 are enforced by tests in `tests/test_privacy_and_control.py`.
 ## Roadmap
 
 1. **Must-haves:** openWakeWord wake word, GPIO mute switch, LED driver, weather lookup via Open-Meteo.
-2. **Core use case:** SQLite FTS5 retrieval (fixes plural/stem misses), remember/recall notes, reminders, grammar-constrained intent routing.
+2. **Core use case:** remember/recall notes, reminders, grammar-constrained intent routing.
 3. **Polish:** signal-based honest fallback, Piper TTS, local web dashboard showing LOCAL vs ONLINE steps, systemd service.
 
 ## Running the tests

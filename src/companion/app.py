@@ -3,7 +3,7 @@
 import argparse
 import time
 
-from .brain.knowledge import load_knowledge
+from .brain.knowledge import KnowledgeBase, load_knowledge
 from .brain.llm import LocalLLM
 from .config import IS_RASPBERRY_PI, AppConfig
 from .device.indicator import ConsoleIndicator
@@ -47,7 +47,12 @@ def main(argv: list[str] | None = None) -> None:
     speaker = PrintSpeaker() if args.text or args.no_tts or not config.tts_enabled else make_speaker()
     assistant = Assistant(
         llm=llm,
-        records=load_knowledge(),
+        knowledge=KnowledgeBase(
+            load_knowledge(config.knowledge.path),
+            primary_user=config.knowledge.primary_user,
+            top_k=config.knowledge.top_k,
+            currency=config.knowledge.currency,
+        ),
         gateway=OnlineGateway(enabled=config.online_lookups_enabled and not args.offline),
         indicator=indicator,
         speaker=speaker,

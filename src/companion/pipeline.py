@@ -5,9 +5,9 @@ from typing import Protocol
 
 import numpy as np
 
-from .brain.knowledge import Records, find_relevant_records
+from .brain.knowledge import KnowledgeBase
 from .brain.policy import require_local_answer
-from .brain.prompts import SYSTEM_PROMPT, build_user_prompt
+from .brain.prompts import NOT_IN_RECORDS_ANSWER, build_system_prompt, build_user_prompt
 from .brain.router import Intent, route
 from .device.indicator import Indicator, IndicatorState
 from .device.mute import MuteSwitch
@@ -84,13 +84,14 @@ class Assistant:
     def __init__(
         self,
         llm: ChatModel,
-        records: Records,
+        knowledge: KnowledgeBase,
         gateway: OnlineGateway,
         indicator: Indicator,
         speaker: Speaker,
     ):
         self.llm = llm
-        self.records = records
+        self.knowledge = knowledge
+        self.system_prompt = build_system_prompt(knowledge.primary_user, knowledge.currency)
         self.gateway = gateway
         self.indicator = indicator
         self.speaker = speaker
@@ -107,8 +108,11 @@ class Assistant:
             online_facts = f"{result.text} (source: {result.source})"
 
         self.indicator.show(IndicatorState.THINKING)
-        knowledge = find_relevant_records(text, self.records)
-        answer = self.llm.chat(SYSTEM_PROMPT, build_user_prompt(text, knowledge, online_facts))
+        knowledge = self.knowledge.context_for(text)
+        if not knowledge and not online_facts and self.knowledge.is_personal(text):
+            # Nothing on record: answer honestly instead of letting the model guess.
+            return NOT_IN_RECORDS_ANSWER
+        answer = self.llm.chat(self.system_prompt, build_user_prompt(text, knowledge, online_facts))
         return require_local_answer(answer)
 
     def run(self, source: InputSource) -> None:

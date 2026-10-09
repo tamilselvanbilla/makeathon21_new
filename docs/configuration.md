@@ -82,9 +82,29 @@ the device's native rate and resampled.
 
 The assistant answers personal questions from `knowledge_base/personal_data.json`,
 which has four lists: `financial`, `medical`, `documents`, `history`. Each entry is a
-JSON object; its `owner` and `source` fields are left out of the text given to the model. Edit
-the file and restart the assistant to pick up changes. Use synthetic data only for
-demos.
+JSON object with an `owner`; `source` is never shown to the model. Edit the file and
+restart the assistant to pick up changes. Use synthetic data only for demos.
+
+| Variable | Default | Description |
+|---|---|---|
+| `KNOWLEDGE_FILE` | `knowledge_base/personal_data.json` | Path to the records file |
+| `PRIMARY_USER` | most frequent `owner` | Whose records "I", "me" and "my" refer to |
+| `KNOWLEDGE_TOP_K` | `4` | Records sent to the model per question; each adds prompt time on a Pi |
+| `CURRENCY` | `INR` | Currency the model uses for money amounts |
+
+### Writing records that answer well
+
+- **Owners:** name other people relative to the primary user, e.g. `"John's wife"`.
+  A `family_member` record with `name` and `relationship` lets questions use the name
+  ("how much does Jane earn"). Owners containing "family" are shared by everyone.
+- **`record_type`:** use the word people will say (`passport`, `bank_loan`,
+  `vehicle`). Naming a type in a question narrows the answer to that type.
+- **Field names:** descriptive snake_case (`expiry_date`, `monthly_installment`); they
+  become labels the search and the model both use.
+- **Missing facts:** leave them out rather than writing placeholders; the assistant
+  then says the fact is not in the records.
+- **New vocabulary:** if people ask with words your records don't use, add a mapping
+  to `SYNONYMS` in `src/companion/brain/knowledge.py`.
 
 ## Recommended Pi 4 profiles
 

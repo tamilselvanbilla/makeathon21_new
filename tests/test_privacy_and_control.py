@@ -12,7 +12,9 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
-from companion.brain import knowledge, policy  # noqa: E402
+from companion.brain import policy  # noqa: E402
+from companion.brain.knowledge import KnowledgeBase  # noqa: E402
+from companion.brain.prompts import NOT_IN_RECORDS_ANSWER  # noqa: E402
 from companion.brain.llm import clean_model_response  # noqa: E402
 from companion.brain.router import Intent, route  # noqa: E402
 from companion.device.indicator import ConsoleIndicator, IndicatorState  # noqa: E402
@@ -74,16 +76,25 @@ class ScriptedInput:
 
 SAMPLE_RECORDS = {
     "financial": [
+        {"owner": "John", "record_type": "income", "source": "Test sample", "monthly_income": 85000},
+        {"owner": "John's wife", "record_type": "income", "source": "Test sample", "monthly_income": 62000},
         {
             "owner": "John",
-            "record_type": "income",
+            "record_type": "bank_loan",
             "source": "Test sample",
-            "monthly_income": 85000,
-        }
+            "loan_type": "Home Loan",
+            "monthly_installment": 9200,
+        },
     ],
     "medical": [],
-    "documents": [],
-    "history": [],
+    "documents": [
+        {"owner": "John's wife", "record_type": "family_member", "name": "Jane", "relationship": "Wife"},
+        {"owner": "John", "record_type": "passport", "document_number": "TEST-PASSPORT-00001"},
+    ],
+    "history": [
+        {"owner": "John's family", "record_type": "family_insurance", "provider": "LIC"},
+        {"owner": "John", "record_type": "personal_accident_insurance", "valid_to": "2027-01-01"},
+    ],
 }
 
 
@@ -92,7 +103,7 @@ def make_assistant(llm=None, gateway=None):
     speaker = FakeSpeaker()
     assistant = Assistant(
         llm=llm or FakeLLM(),
-        records=SAMPLE_RECORDS,
+        knowledge=KnowledgeBase(SAMPLE_RECORDS),
         gateway=gateway or OnlineGateway(enabled=True),
         indicator=indicator,
         speaker=speaker,
@@ -149,12 +160,61 @@ class ReasoningTests(unittest.TestCase):
         self.assertIs(route("what's the weather today"), Intent.ONLINE_LOOKUP)
         self.assertIs(route("when does my passport expire"), Intent.LOCAL_REASONING)
 
-    def test_knowledge_matches_are_readable_prose(self):
-        result = knowledge.find_relevant_records("income for John", SAMPLE_RECORDS)
-        self.assertIn("monthly income", result.casefold())
-        self.assertIn("85000", result)
+    def test_knowledge_matches_are_readable_owner_labelled_prose(self):
+        result = KnowledgeBase(SAMPLE_RECORDS).context_for("what is my monthly income")
+        self.assertIn("record of John:", result)
+        self.assertIn("Monthly Income: 85000", result)
         self.assertNotIn("{", result)
-        self.assertNotIn("[history]", result)
+
+
+class KnowledgeSearchTests(unittest.TestCase):
+    def setUp(self):
+        self.kb = KnowledgeBase(SAMPLE_RECORDS)
+
+    def owners(self, question):
+        return [match.owner for match in self.kb.search(question)]
+
+    def test_primary_user_is_most_frequent_owner(self):
+        self.assertEqual(self.kb.primary_user, "John")
+
+    def test_my_means_primary_user_only(self):
+        self.assertEqual(self.owners("what is my income"), ["John"])
+
+    def test_naming_another_person_returns_their_records(self):
+        self.assertEqual(set(self.owners("what is my wife's income")), {"John's wife"})
+        self.assertIn("John's wife", self.owners("how much does Jane earn"))
+
+    def test_family_questions_cover_everyone(self):
+        self.assertIn("John's wife", self.owners("who is in my family"))
+
+    def test_shared_family_records_are_included_by_default(self):
+        self.assertIn("John's family", self.owners("do I have insurance"))
+
+    def test_stemming_and_synonyms(self):
+        self.assertIn("Home Loan", self.kb.context_for("what loans do I have"))
+        self.assertIn("Home Loan", self.kb.context_for("what is my EMI"))
+
+    def test_named_record_type_excludes_neighbouring_records(self):
+        context = self.kb.context_for("what is my passport number")
+        self.assertIn("TEST-PASSPORT-00001", context)
+        self.assertNotIn("insurance", context)
+
+    def test_missing_attribute_returns_nothing_instead_of_neighbours(self):
+        self.assertEqual(self.kb.search("when does my passport expire"), [])
+        self.assertTrue(self.kb.search("what is my passport number"))
+
+    def test_synonym_note_explains_user_terms(self):
+        self.assertIn("'emi' refers to installment", self.kb.context_for("what is my EMI"))
+
+    def test_top_k_limits_results(self):
+        self.assertEqual(len(KnowledgeBase(SAMPLE_RECORDS, top_k=1).search("my monthly income loan")), 1)
+
+    def test_fts_operators_in_questions_are_harmless(self):
+        self.assertEqual(self.kb.search('income" OR NOT * ('), self.kb.search("income"))
+
+    def test_personal_question_detection(self):
+        self.assertTrue(self.kb.is_personal("where did I park"))
+        self.assertFalse(self.kb.is_personal("what is the capital of France"))
 
 
 class PipelineTests(unittest.TestCase):
@@ -174,6 +234,19 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("won't guess", reply)
         self.assertEqual(llm.calls, [])
         self.assertIn(IndicatorState.ONLINE, indicator.states)
+
+    def test_personal_question_without_records_skips_the_model(self):
+        llm = FakeLLM()
+        assistant, _, _ = make_assistant(llm=llm)
+        self.assertEqual(assistant.respond("what is my blood group"), NOT_IN_RECORDS_ANSWER)
+        self.assertEqual(assistant.respond("when does my passport expire"), NOT_IN_RECORDS_ANSWER)
+        self.assertEqual(llm.calls, [])
+
+    def test_general_question_without_records_still_reaches_the_model(self):
+        llm = FakeLLM("Paris.")
+        assistant, _, _ = make_assistant(llm=llm)
+        self.assertEqual(assistant.respond("what is the capital of France"), "Paris.")
+        self.assertIn("No personal records matched.", llm.calls[0])
 
     def test_uncertain_model_answer_falls_back(self):
         assistant, _, _ = make_assistant(llm=FakeLLM("I do not know."))

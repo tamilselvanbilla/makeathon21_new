@@ -113,10 +113,30 @@ class CaptureConfig:
 
 
 @dataclass(frozen=True)
+class KnowledgeConfig:
+    path: Path
+    primary_user: str | None
+    top_k: int
+    currency: str
+
+    @classmethod
+    def from_env(cls) -> "KnowledgeConfig":
+        return cls(
+            path=Path(os.getenv("KNOWLEDGE_FILE", str(PROJECT_ROOT / "knowledge_base" / "personal_data.json"))),
+            # Whose records "my"/"I" refer to; defaults to the most frequent owner.
+            primary_user=os.getenv("PRIMARY_USER") or None,
+            # Records sent to the LLM per question; each one adds prompt time on a Pi.
+            top_k=_env_int("KNOWLEDGE_TOP_K", 4),
+            currency=os.getenv("CURRENCY", "INR"),
+        )
+
+
+@dataclass(frozen=True)
 class AppConfig:
     llm: LLMConfig
     stt: STTConfig
     capture: CaptureConfig
+    knowledge: KnowledgeConfig
     online_lookups_enabled: bool
     tts_enabled: bool
 
@@ -126,6 +146,7 @@ class AppConfig:
             llm=LLMConfig.from_env(),
             stt=STTConfig.from_env(),
             capture=CaptureConfig.from_env(),
+            knowledge=KnowledgeConfig.from_env(),
             online_lookups_enabled=_env_bool("ONLINE_LOOKUPS", True),
             tts_enabled=_env_bool("TTS_ENABLED", True),
         )

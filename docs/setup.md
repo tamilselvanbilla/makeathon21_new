@@ -367,7 +367,7 @@ not recommended.
 | `Speech output failed: aplay: ... No such file or directory` / `Device or resource busy` | Wrong device name, or a desktop sound server holds the card: check `scripts/run.sh --list-speakers`; on Pi OS Desktop use `AUDIO_OUTPUT_DEVICE=default` |
 | No spoken reply, no error | Audio is going to HDMI or is muted: set `AUDIO_OUTPUT_DEVICE` (section 4.5) and raise volume with `alsamixer` |
 | Replies are slow | Use `WHISPER_MODEL_SIZE=tiny.en`, lower `LLM_MAX_TOKENS`, check cooling |
-| "I don't have any loans" although the data has a loan | Known limitation: retrieval matches whole words only ("loans" ≠ "loan"). Rephrase ("loan details"); stemmed search is on the roadmap |
+| "I couldn't find that in your personal records" although the data has it | The question uses a word your records don't. Add it to `SYNONYMS` in `src/companion/brain/knowledge.py`, or use the record's own wording (see configuration.md, *Writing records that answer well*) |
 
 ### Logs
 
