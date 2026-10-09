@@ -1,0 +1,18 @@
+{
+  "description": "Company and index names the assistant may look up online, mapped to Yahoo Finance symbols. Only the symbol is ever sent. Holdings in personal_data.json (with a 'ticker') are added automatically.",
+  "symbols": {
+    "nifty": "^NSEI",
+    "nifty 50": "^NSEI",
+    "sensex": "^BSESN",
+    "infosys": "INFY.NS",
+    "tcs": "TCS.NS",
+    "tata consultancy services": "TCS.NS",
+    "reliance": "RELIANCE.NS",
+    "hdfc bank": "HDFCBANK.NS",
+    "icici bank": "ICICIBANK.NS",
+    "wipro": "WIPRO.NS",
+    "sbi": "SBIN.NS",
+    "state bank of india": "SBIN.NS"
+  },
+  "indices": ["^NSEI", "^BSESN"]
+}

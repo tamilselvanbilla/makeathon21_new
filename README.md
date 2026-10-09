@@ -42,10 +42,10 @@ keeps working with the network cable unplugged.
 |---|---|---|
 | All reasoning on-device, no cloud LLM | ✅ Done | Qwen3-0.6B Q4 via llama.cpp: `brain/llm.py` |
 | Raw audio never leaves the device | ✅ Done | Audio held in RAM only; the gateway accepts text only, and a test fails if any other module imports a network library |
-| Online calls limited to factual lookups | ✅ Done | Weather via Open-Meteo: only the place name and day leave the device; the reply reads the online facts with their source, then adds local advice. News/search are refused honestly |
+| Online calls limited to factual lookups | ✅ Done | Weather (Open-Meteo), **share market** (Yahoo Finance prices, AMFI fund NAVs) and **news** (The Hindu, BBC RSS). Only public identifiers leave the device (a place, ticker symbols, fund codes, a feed address); holdings, topics and questions stay local, and all arithmetic is done on the device. Each feature can be switched off |
 | Honest fallback instead of guessing | 🟡 Basic | `brain/policy.py`; signal-based fallback is planned |
-| Working demo in one human-potential domain | 🟡 Basic | Personal records recall over `knowledge_base/` |
-| Continuous sensing with **wake word** | ✅ Done | "Hey Jarvis" spotted in Whisper transcripts (no wake-word model, MIT licence); after waking, follow-up questions need no wake phrase until 30 s of silence or "that's all" |
+| Working demo in a human-potential domain | ✅ Memory & recall | Personal records (`knowledge_base/`), notes ("remember that I parked on B2"), past conversations ("what did you tell me about my EMI?") and follow-ups ("and my wife's?"), all stored on the device. Hybrid search (keywords + a 23 MB embedding model) finds paraphrases ("power tool", "travel documents"); answers found only by meaning are hedged |
+| Continuous sensing with **wake word** | ✅ Done | "Hey Sam" spotted in Whisper transcripts (a greeting is required, so talk *about* a Sam doesn't wake it) (no wake-word model, MIT licence); after waking, follow-up questions need no wake phrase until 30 s of silence or "that's all" |
 | **Physical mute switch** | ⏳ Next | Interface and software switch done; GPIO driver planned |
 | **Visible listening light** | ⏳ Next | All states implemented, printed to the console; LED driver planned |
 
@@ -70,8 +70,7 @@ and adjusts its defaults.
 git clone <this repo> && cd makeathon21_new
 scripts/setup.sh                 # one-time install; nothing is compiled on the Pi
 scripts/run.sh --text            # type to it first, to check the language model
-scripts/run.sh --list-mics       # find your microphone index
-MIC_DEVICE=1 scripts/run.sh      # talk to it
+scripts/run.sh                   # talk to it (the microphone is picked automatically)
 ```
 
 `setup.sh` installs system packages, creates `.venv`, installs Python dependencies,
@@ -93,11 +92,20 @@ the tests. For each step explained, manual installation, and troubleshooting, se
 | `scripts/run.sh --list-speakers` | List audio outputs (Pi 4 aux jack: `plughw:CARD=Headphones`) |
 | `scripts/run.sh --speaker-test` | Speak a test phrase through `AUDIO_OUTPUT_DEVICE` |
 
+On start-up the assistant introduces itself: *"Hello John, I'm Sam, your private assistant.
+Say "Hey Sam" to start."*
+
 Try asking:
 
 - "What is my monthly income?" (answered locally from `knowledge_base/personal_data.json`)
-- "Hey Jarvis, what's the weather in Bengaluru?" (only "Bengaluru" and "today" go online; the console shows `[ONLINE]` and `[LOCAL]` steps)
+- "Hey Sam, what's the weather in Bengaluru?" (only "Bengaluru" and "today" go online; the console shows `[ONLINE]` and `[LOCAL]` steps)
 - then, without the wake phrase: "Do I need an umbrella tomorrow?", and finally "That's all, thanks." to end the conversation
+- "Remember that I parked on level B2" … later, even after a restart: "Where did I park?"
+- "What is my monthly income?" then "And my wife's?"; later "What did you tell me about my wife's income?"
+- "Forget that" / "Forget everything"
+- "How are my investments doing today?" (only `INFY.NS`, `^NSEI`, `^BSESN` and fund code `120377` go online; values and gains are computed on the device)
+- "What's the Nifty at?" / "What is the TCS share price?"
+- "Latest business news" / "Any news about TCS?" (whole feeds are downloaded; "TCS" is matched on the device)
 - "Exit" (stops the session)
 
 The `[LED] ...` lines in the console show the indicator state: `IDLE`, `LISTENING`,
@@ -128,7 +136,7 @@ src/
     online_gateway.py             the ONLY module allowed network access
     telemetry.py                  JSON timing logs (no prompts or audio)
     audio/   capture.py, stt.py
-    brain/   llm.py, router.py, prompts.py, policy.py, knowledge.py
+    brain/   llm.py, router.py, prompts.py, policy.py, knowledge.py, memory.py, wake.py
     device/  indicator.py, mute.py, tts.py
 knowledge_base/personal_data.json synthetic personal records used in the demo
 tests/                            unit tests (run without models or audio hardware)
@@ -142,9 +150,15 @@ tests/                            unit tests (run without models or audio hardwa
 3. **One network exit.** Only `online_gateway.py` may import networking code. It accepts
    plain text only, refuses requests mentioning private data (financial, medical,
    documents, recordings), and only contacts allowlisted hosts.
-4. **Models are offline at runtime.** `run.sh` sets `HF_HUB_OFFLINE=1`, so model libraries
-   cannot download or report anything.
-5. **Logs hold timings, not content.** `logs/assistant.log` records events and durations,
+4. **Models are offline at runtime.** Every model loads from local files only (Whisper with
+   `local_files_only=True`, the others from `models/`), however the app is started; `run.sh`
+   additionally sets `HF_HUB_OFFLINE=1`. A traced session made no connections except the
+   two Open-Meteo calls for a weather question.
+5. **Memory stays on the device and can be erased.** Notes and past questions and answers
+   are kept as text in `data/memory.sqlite3` (git-ignored), deleted after 30 days, and
+   erased on request ("forget that", "forget everything"). Audio and ignored speech are
+   never stored; `MEMORY=0` keeps memory for the current session only.
+6. **Logs hold timings, not content.** `logs/assistant.log` records events and durations,
    never prompts, transcripts, or audio.
 
 Points 2 and 3 are enforced by tests in `tests/test_privacy_and_control.py`.
@@ -156,11 +170,12 @@ Points 2 and 3 are enforced by tests in `tests/test_privacy_and_control.py`.
 | [docs/setup.md](docs/setup.md) | Install on a Pi or laptop, step by step, and fix problems |
 | [docs/configuration.md](docs/configuration.md) | Tune models, microphone sensitivity, or performance |
 | [docs/architecture.md](docs/architecture.md) | Understand the pipeline or add a feature |
+| [docs/benchmarks.md](docs/benchmarks.md) | See how the language and memory models were chosen, and re-run the benchmarks on the Pi |
 
 ## Roadmap
 
 1. **Must-haves:** GPIO mute switch and LED driver (interfaces ready; waiting on hardware choice).
-2. **Core use case:** remember/recall notes, reminders, grammar-constrained intent routing.
+2. **Core use case:** spoken reminders ("remind me at 6"), grammar-constrained intent routing.
 3. **Polish:** signal-based honest fallback, Piper TTS, local web dashboard showing LOCAL vs ONLINE steps, systemd service.
 
 ## Running the tests

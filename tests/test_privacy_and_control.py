@@ -1,9 +1,13 @@
 import ast
+import json
 import contextlib
 import io
 import subprocess
 import sys
+import tempfile
+from types import SimpleNamespace
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import numpy as np
@@ -13,15 +17,24 @@ SRC = ROOT / "src"
 sys.path.insert(0, str(SRC))
 
 from companion.brain import policy  # noqa: E402
-from companion.brain.knowledge import KnowledgeBase  # noqa: E402
-from companion.brain.prompts import NOT_IN_RECORDS_ANSWER  # noqa: E402
+from companion.brain.knowledge import KnowledgeBase, load_knowledge  # noqa: E402
+from companion.brain.memory import (  # noqa: E402
+    ConversationMemory,
+    MemoryCommand,
+    note_answer,
+    parse_memory_command,
+)
+from companion.brain.prompts import NO_RECORDS, NOT_IN_RECORDS_ANSWER, build_system_prompt, build_welcome  # noqa: E402
 from companion.brain.llm import clean_model_response  # noqa: E402
-from companion.audio.capture import record_command  # noqa: E402
+from companion.audio.capture import pick_microphone, record_command  # noqa: E402
+from companion.audio.stt import looks_like_noise, reliable  # noqa: E402
 from companion.brain.router import Intent, extract_place, parse_lookup, route  # noqa: E402
 from companion.config import CaptureConfig  # noqa: E402
 from companion.device.indicator import ConsoleIndicator, IndicatorState  # noqa: E402
 from companion.device.mute import SoftwareMuteSwitch  # noqa: E402
 from companion.device.tts import EspeakSpeaker  # noqa: E402
+from companion.brain.market import Portfolio  # noqa: E402
+from companion.brain.news import news_request  # noqa: E402
 from companion.online_gateway import (  # noqa: E402
     FORECAST_URL,
     GEOCODING_URL,
@@ -95,6 +108,27 @@ FORECAST = {
 }
 
 
+def chart(price, previous, name):
+    return {"chart": {"result": [{"meta": {
+        "shortName": name, "regularMarketPrice": price, "chartPreviousClose": previous, "currency": "INR"}}]}}
+
+
+QUOTES = {
+    "INFY.NS": chart(1023.4, 997.0, "INFOSYS LIMITED"),
+    "%5ENSEI": chart(22520.45, 22603.1, "NIFTY 50"),
+    "%5EBSESN": chart(72472.33, 72638.7, "S&P BSE SENSEX"),
+    "TCS.NS": chart(2156.0, 2075.0, "TATA CONSULTANCY SERV LT"),
+}
+NAV = {"meta": {"scheme_name": "ICICI Prudential Balanced Advantage Fund - Direct Plan - Growth"},
+       "data": [{"date": "08-10-2026", "nav": "84.40000"}]}
+RSS = """<?xml version="1.0"?><rss><channel>
+<item><title>TCS builds higher bench</title><pubDate>Fri, 09 Oct 2026 10:00:00 +0530</pubDate></item>
+<item><title>Stock markets rebound led by TCS</title><pubDate>Fri, 09 Oct 2026 09:00:00 +0530</pubDate></item>
+<item><title>Coal supplies rise 36%</title><pubDate>Fri, 09 Oct 2026 11:00:00 +0530</pubDate></item>
+<item><title>Cricket betting racket busted</title><pubDate>Fri, 09 Oct 2026 08:00:00 +0530</pubDate></item>
+</channel></rss>"""
+
+
 class FakeFetch:
     """Stands in for the network: records what would have been sent."""
 
@@ -103,12 +137,24 @@ class FakeFetch:
         self.fail = fail
         self.sent = []
 
-    def __call__(self, url, params):
+    def __call__(self, url, params, as_text=False):
         check_host_allowed(url)
         self.sent.append((url, params))
         if self.fail:
-            raise LookupUnavailable("I couldn't reach the weather service.")
+            raise LookupUnavailable("I couldn't reach the service.")
+        if "finance.yahoo" in url:
+            symbol = url.rsplit("/", 1)[1]
+            if symbol not in QUOTES:
+                raise LookupUnavailable("unknown symbol")
+            return QUOTES[symbol]
+        if "mfapi" in url:
+            return NAV
+        if as_text:
+            return RSS
         return self.geocode if url == GEOCODING_URL else FORECAST
+
+    def sent_text(self):
+        return " ".join(f"{url} {params}" for url, params in self.sent)
 
 
 def frames(*levels):
@@ -143,7 +189,7 @@ def conversation(transcripts, seconds=(1,), muted=False, timeout=30):
     transcriber = FakeTranscriber(*transcripts)
     indicator = RecordingIndicator()
     source = MicInput(
-        capture, transcriber, SoftwareMuteSwitch(muted), indicator, WakePhrase("hey jarvis"), timeout
+        capture, transcriber, SoftwareMuteSwitch(muted), indicator, WakePhrase("hey sam"), timeout
     )
     return source, capture, transcriber, indicator
 
@@ -186,13 +232,43 @@ SAMPLE_RECORDS = {
 }
 
 
-def make_assistant(llm=None, gateway=None):
+class Clock:
+    def __init__(self, start=datetime(2026, 10, 9, 10, 0)):
+        self.now = start
+
+    def __call__(self):
+        return self.now
+
+    def advance(self, **delta):
+        self.now += timedelta(**delta)
+
+
+HOLDINGS = {
+    "financial": [
+        {"owner": "John", "record_type": "stock", "company": "Infosys Ltd.", "ticker": "INFY.NS",
+         "quantity": 10, "purchase_price": 1750},
+        {"owner": "John", "record_type": "mutual_fund", "scheme": "ICICI Prudential Balanced Advantage Fund",
+         "scheme_code": 120377, "units": 323.5, "investment_amount": 25000},
+        {"owner": "John's wife", "record_type": "stock", "company": "Wipro", "ticker": "WIPRO.NS",
+         "quantity": 99, "purchase_price": 400},
+    ]
+}
+SYMBOLS_FILE = ROOT / "knowledge_base" / "market_symbols.json"
+
+
+def make_portfolio():
+    return Portfolio.load(HOLDINGS, "John", SYMBOLS_FILE)
+
+
+def make_assistant(llm=None, gateway=None, memory=None, portfolio=None):
     indicator = RecordingIndicator()
     speaker = FakeSpeaker()
     assistant = Assistant(
         llm=llm or FakeLLM(),
         knowledge=KnowledgeBase(SAMPLE_RECORDS),
         gateway=gateway or OnlineGateway(enabled=True, fetch=FakeFetch()),
+        memory=memory,
+        portfolio=portfolio,
         indicator=indicator,
         speaker=speaker,
     )
@@ -267,9 +343,11 @@ class PrivacyTests(unittest.TestCase):
 
 class ReasoningTests(unittest.TestCase):
     def test_local_reasoning_has_fallback(self):
-        self.assertTrue(policy.should_fallback("I cannot answer this accurately"))
-        self.assertTrue(policy.should_fallback("   "))
-        self.assertFalse(policy.should_fallback("Here is the answer"))
+        self.assertTrue(policy.is_uncertain("I cannot answer this accurately"))
+        self.assertTrue(policy.is_uncertain("   "))
+        self.assertFalse(policy.is_uncertain("Here is the answer"))
+        self.assertEqual(policy.require_local_answer("  "), policy.LOCAL_FALLBACK_ANSWER)
+        self.assertEqual(policy.require_local_answer("It is not recorded."), "It is not recorded.")
 
     def test_thinking_trace_and_duplicates_are_removed(self):
         raw = "<think>\nlet me reason\n</think>\n\nAnswer: It is sunny. It is sunny."
@@ -288,6 +366,14 @@ class ReasoningTests(unittest.TestCase):
     def test_rain_matches_whole_words_only(self):
         self.assertIs(route("will it rain in Chennai"), Intent.ONLINE_LOOKUP)
         self.assertIs(route("when is my train"), Intent.LOCAL_REASONING)
+        self.assertIs(route("where is my umbrella?"), Intent.LOCAL_REASONING)
+        self.assertIs(route("do I need an umbrella tomorrow?"), Intent.ONLINE_LOOKUP)
+
+    def test_replies_speak_to_the_user(self):
+        self.assertEqual(clean_model_response("The validity period of my insurance ends in 2027."),
+                         "The validity period of your insurance ends in 2027.")
+        self.assertEqual(clean_model_response("My EMI is INR 9200."), "Your EMI is INR 9200.")
+        self.assertEqual(clean_model_response("Let me know if you need more."), "Let me know if you need more.")
 
     def test_router(self):
         self.assertIs(route("Exit."), Intent.EXIT)
@@ -341,7 +427,8 @@ class KnowledgeSearchTests(unittest.TestCase):
         self.assertIn("'emi' refers to installment", self.kb.context_for("what is my EMI"))
 
     def test_top_k_limits_results(self):
-        self.assertEqual(len(KnowledgeBase(SAMPLE_RECORDS, top_k=1).search("my monthly income loan")), 1)
+        self.assertEqual(len(KnowledgeBase(SAMPLE_RECORDS).search("do I have insurance")), 2)
+        self.assertEqual(len(KnowledgeBase(SAMPLE_RECORDS, top_k=1).search("do I have insurance")), 1)
 
     def test_fts_operators_in_questions_are_harmless(self):
         self.assertEqual(self.kb.search('income" OR NOT * ('), self.kb.search("income"))
@@ -349,6 +436,69 @@ class KnowledgeSearchTests(unittest.TestCase):
     def test_personal_question_detection(self):
         self.assertTrue(self.kb.is_personal("where did I park"))
         self.assertFalse(self.kb.is_personal("what is the capital of France"))
+
+
+class RetrievalBenchmarkTests(unittest.TestCase):
+    """Natural spoken questions over the real records (tests/data/knowledge_retrieval_eval.json)."""
+
+    def test_every_question_finds_the_right_record_or_nothing(self):
+        kb = KnowledgeBase(load_knowledge())
+        failures = []
+        for case in json.loads((ROOT / "tests" / "data" / "knowledge_retrieval_eval.json").read_text())["cases"]:
+            if case.get("known_miss"):
+                continue
+            hits = kb.search(case["q"])
+            top = hits[0].text.split(";")[0].replace("Record Type: ", "") if hits else None
+            if (top is not None) if case["expect"] is None else (top not in case["expect"]):
+                failures.append(f"{case['q']} -> {top} (expected {case['expect']})")
+        self.assertEqual(failures, [])
+
+
+class MicrophoneSelectionTests(unittest.TestCase):
+    MAC = [(0, "MacBook Pro Microphone")]
+    PI = [(0, "bcm2835 Headphones: - (hw:0,0)"), (1, "Monitor of Built-in Audio"), (2, "USB PnP Sound Device: Audio (hw:2,0)")]
+
+    def test_system_default_is_used_without_asking(self):
+        self.assertEqual(pick_microphone(self.MAC, 0, None), 0)
+
+    def test_without_a_default_a_likely_microphone_is_chosen(self):
+        self.assertEqual(pick_microphone(self.PI, None, None), 2)  # USB mic, not the monitor or headphone jack
+
+    def test_mic_device_by_index_or_name(self):
+        self.assertEqual(pick_microphone(self.PI, 0, "2"), 2)
+        self.assertEqual(pick_microphone(self.PI, 0, "usb"), 2)
+        with self.assertRaises(RuntimeError):
+            pick_microphone(self.PI, 0, "7")
+        with self.assertRaises(RuntimeError):
+            pick_microphone(self.PI, 0, "ReSpeaker")
+
+
+class SpeechFilterTests(unittest.TestCase):
+    def test_repetitive_noise_transcripts_are_dropped(self):
+        self.assertTrue(looks_like_noise("M.D. M.D. M.D. You have to back up. M.D. S.B. S.B. S.B. S.B. S.B. S.B."))
+        self.assertFalse(looks_like_noise("Can you give me what are the medications I am taking daily?"))
+        self.assertFalse(looks_like_noise("no no no no"))  # short answers are kept
+
+    def test_whisper_quality_signals(self):
+        segment = lambda **kw: SimpleNamespace(**{"no_speech_prob": 0.1, "avg_logprob": -0.3, "compression_ratio": 1.2, **kw})  # noqa: E731
+        self.assertTrue(reliable(segment()))
+        self.assertFalse(reliable(segment(no_speech_prob=0.8, avg_logprob=-1.4)))  # probably silence
+        self.assertFalse(reliable(segment(compression_ratio=3.1)))  # degenerate repetition
+
+
+class PromptTests(unittest.TestCase):
+    def test_system_prompt_describes_role_records_and_family(self):
+        kb = KnowledgeBase(load_knowledge())
+        prompt = build_system_prompt(kb.primary_user, kb.currency, "Sam", kb.family)
+        for part in ("personal assistant for John", "insurance policies", "medical and health records",
+                     "identity documents", "(wife Jane, son Robert)", "use only Knowledge and Memory",
+                     "general questions", "identity numbers only when asked"):
+            self.assertIn(part, prompt)
+
+    def test_welcome_names_the_assistant_and_how_to_wake_it(self):
+        welcome = build_welcome("Sam", "John", "hey sam")
+        self.assertEqual(welcome, 'Hello John, I\'m Sam, your private assistant. Say "Hey Sam" to start.')
+        self.assertTrue(build_welcome("Sam", "John", None).endswith("Ask me anything."))
 
 
 class PipelineTests(unittest.TestCase):
@@ -402,11 +552,13 @@ class PipelineTests(unittest.TestCase):
         llm = FakeLLM("Paris.")
         assistant, _, _ = make_assistant(llm=llm)
         self.assertEqual(assistant.respond("what is the capital of France"), "Paris.")
-        self.assertIn("No personal records matched.", llm.calls[0])
+        self.assertIn(f"Knowledge: {NO_RECORDS}", llm.calls[0])
 
-    def test_uncertain_model_answer_falls_back(self):
-        assistant, _, _ = make_assistant(llm=FakeLLM("I do not know."))
-        self.assertEqual(assistant.respond("what is my income"), policy.LOCAL_FALLBACK_ANSWER)
+    def test_uncertain_model_answer_is_spoken_but_not_remembered(self):
+        memory = ConversationMemory(clock=Clock())
+        assistant, _, _ = make_assistant(llm=FakeLLM("I do not know."), memory=memory)
+        self.assertEqual(assistant.respond("what is my income"), "I do not know.")
+        self.assertIsNone(memory.last_turn())
 
     def test_run_survives_errors_and_stops_on_exit(self):
         class BrokenLLM:
@@ -419,6 +571,312 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("something went wrong", speaker.said[0])
         self.assertEqual(speaker.said[1], "Goodbye.")
         self.assertIs(indicator.states[-1], IndicatorState.IDLE)
+
+
+class MemoryTests(unittest.TestCase):
+    def setUp(self):
+        self.clock = Clock()
+        self.memory = ConversationMemory(clock=self.clock)
+
+    def test_memory_commands(self):
+        self.assertEqual(
+            parse_memory_command("Remember that I parked on level B2."),
+            MemoryCommand("remember", "I parked on level B2"),
+        )
+        self.assertEqual(parse_memory_command("note my locker code is 4512"), MemoryCommand("remember", "my locker code is 4512"))
+        self.assertEqual(parse_memory_command("Forget that."), MemoryCommand("forget_last"))
+        self.assertEqual(parse_memory_command("forget everything"), MemoryCommand("forget_all"))
+        self.assertIsNone(parse_memory_command("do you remember where I parked"))
+        self.assertIsNone(parse_memory_command("what is my EMI"))
+
+    def test_notes_are_found_by_stemmed_words(self):
+        self.memory.add_note("I parked on level B2")
+        self.assertIn("parked on level B2", self.memory.context_for("where did I park?"))
+
+    def test_past_turns_only_for_recall_questions(self):
+        self.memory.add_turn("what is my EMI", "Your EMI is INR 9200.")
+        self.assertEqual(self.memory.context_for("what is my EMI"), "")
+        self.assertIn("INR 9200", self.memory.context_for("what did you tell me about my EMI?"))
+
+    def test_yesterday_filter(self):
+        self.memory.add_turn("what is my EMI", "Your EMI is INR 9200.")
+        self.clock.advance(days=1)
+        self.memory.add_turn("when does my passport expire", "Not in your records.")
+        context = self.memory.context_for("what did I ask yesterday?")
+        self.assertIn("EMI", context)
+        self.assertNotIn("passport", context)
+
+    def test_follow_up_window(self):
+        self.memory.add_turn("what is my monthly income", "Your monthly income is INR 85,000.")
+        self.assertEqual(self.memory.last_turn().question, "what is my monthly income")
+        self.clock.advance(minutes=11)
+        self.assertIsNone(self.memory.last_turn())
+
+    def test_forget(self):
+        self.memory.add_note("my locker code is 4512")
+        self.memory.add_note("I parked on level B2")
+        self.assertEqual(self.memory.forget_last().question, "I parked on level B2")
+        self.assertEqual(self.memory.forget_all(), 1)
+        self.assertEqual(self.memory.context_for("locker code"), "")
+
+    def test_persists_across_restarts_and_expires(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "memory.sqlite3"
+            ConversationMemory(path, clock=self.clock).add_note("I parked on level B2")
+            self.assertIn("B2", ConversationMemory(path, clock=self.clock).context_for("where did I park"))
+            self.clock.advance(days=31)
+            self.assertEqual(ConversationMemory(path, clock=self.clock).context_for("where did I park"), "")
+
+
+class ConceptEmbedder:
+    """Deterministic stand-in for a sentence-embedding model: one dimension per concept."""
+
+    CONCEPTS = [
+        ("drill", "power tool"),
+        ("umbrella", "brolly"),
+        ("birthday", "wish"),
+        ("parked", "park", "car", "level"),
+        ("passport", "travel documents"),
+    ]
+
+    def __init__(self):
+        self.calls = 0
+
+    def embed(self, texts, query=False):
+        self.calls += 1
+        vectors = []
+        for text in texts:
+            lowered = text.casefold()
+            vec = np.array([1.0 if any(w in lowered for w in words) else 0.0 for words in self.CONCEPTS] + [0.1])
+            vectors.append(vec / np.linalg.norm(vec))
+        return np.array(vectors, dtype=np.float32)
+
+
+class HybridMemoryTests(unittest.TestCase):
+    def setUp(self):
+        self.clock = Clock()
+        self.memory = ConversationMemory(clock=self.clock, embedder=ConceptEmbedder(), min_similarity=0.5)
+        for note in ("I lent my drill to Ravi", "I left my umbrella in the car", "mom's birthday is on 12 March"):
+            self.memory.add_note(note)
+
+    def test_paraphrase_found_by_meaning_and_marked_inexact(self):
+        hits = self.memory.search("who did I give my power tool to?")
+        self.assertEqual(hits[0].question, "I lent my drill to Ravi")
+        self.assertFalse(hits[0].exact)
+
+    def test_full_keyword_match_is_exact_and_first(self):
+        hits = self.memory.search("who has my drill?")
+        self.assertEqual(hits[0].question, "I lent my drill to Ravi")
+        self.assertTrue(hits[0].exact)
+
+    def test_unrelated_question_finds_nothing(self):
+        self.assertEqual(self.memory.search("what is my bank PIN?"), [])
+
+    def test_near_miss_is_answered_with_a_hedge(self):
+        hit = self.memory.search("when is my wife's birthday?")[0]
+        self.assertFalse(hit.exact)
+        self.assertTrue(note_answer(hit).startswith("I'm not certain, but the closest thing I remember is: on 9 October"))
+        exact = self.memory.search("when is mom's birthday?")[0]
+        self.assertEqual(note_answer(exact), "On 9 October you told me that mom's birthday is on 12 March.")
+
+    def test_vectors_are_deleted_with_their_memories(self):
+        self.memory.forget_last()
+        self.assertEqual(self.memory._db.execute("SELECT count(*) FROM vectors").fetchone()[0], 2)
+        self.memory.forget_all()
+        self.assertEqual(self.memory._db.execute("SELECT count(*) FROM vectors").fetchone()[0], 0)
+
+    def test_existing_memories_are_embedded_when_a_model_is_added(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "memory.sqlite3"
+            ConversationMemory(path, clock=self.clock).add_note("I lent my drill to Ravi")  # keyword-only
+            upgraded = ConversationMemory(path, clock=self.clock, embedder=ConceptEmbedder(), min_similarity=0.5)
+            self.assertEqual(upgraded.search("who has my power tool?")[0].question, "I lent my drill to Ravi")
+
+    def test_keyword_only_mode_still_hedges_partial_matches(self):
+        memory = ConversationMemory(clock=self.clock)
+        memory.add_note("mom's birthday is on 12 March")
+        self.assertFalse(memory.search("when is my wife's birthday?")[0].exact)
+        self.assertTrue(memory.search("when is mom's birthday?")[0].exact)
+
+
+class AssistantMemoryTests(unittest.TestCase):
+    def setUp(self):
+        self.memory = ConversationMemory(clock=Clock())
+
+    def test_remember_is_confirmed_without_the_model(self):
+        llm = FakeLLM()
+        assistant, _, _ = make_assistant(llm=llm, memory=self.memory)
+        reply, _ = quietly(assistant.respond, "Remember that I parked on level B2")
+        self.assertEqual(reply, "Okay, I'll remember that you parked on level B2.")
+        self.assertEqual(llm.calls, [])
+
+    def test_recall_answers_from_the_note_without_the_model(self):
+        llm = FakeLLM()
+        assistant, _, _ = make_assistant(llm=llm, memory=self.memory)
+        quietly(assistant.respond, "remember that I parked on level B2")
+        reply, out = quietly(assistant.respond, "Where did I park?")
+        self.assertEqual(reply, "On 9 October you told me that you parked on level B2.")
+        self.assertEqual(llm.calls, [])
+        self.assertIn("[MEMORY] using 1 remembered item", out)
+
+    def test_recall_of_past_answers_goes_through_the_model(self):
+        llm = FakeLLM("I told you your EMI is INR 9200.")
+        assistant, _, _ = make_assistant(llm=llm, memory=self.memory)
+        quietly(assistant.respond, "what is my EMI")
+        quietly(assistant.respond, "what did you tell me about my EMI?")
+        self.assertIn("You answered: I told you", llm.calls[-1])
+
+    def test_follow_up_uses_the_previous_question(self):
+        llm = FakeLLM("Your wife's monthly income is INR 62,000.")
+        assistant, _, _ = make_assistant(llm=llm, memory=self.memory)
+        quietly(assistant.respond, "what is my monthly income")
+        quietly(assistant.respond, "And my wife's?")
+        prompt = llm.calls[-1]
+        self.assertIn("Previous question: what is my monthly income", prompt)
+        self.assertIn("record of John's wife", prompt)
+
+    def test_honest_misses_are_not_remembered(self):
+        assistant, _, _ = make_assistant(memory=self.memory)
+        quietly(assistant.respond, "what is my blood group")
+        self.assertIsNone(self.memory.last_turn())
+
+    def test_weather_follow_up_changes_only_the_place(self):
+        fetch = FakeFetch()
+        assistant, _, _ = make_assistant(gateway=OnlineGateway(fetch=fetch), memory=self.memory)
+        quietly(assistant.respond, "weather in Bengaluru tomorrow")
+        quietly(assistant.respond, "What about in Mumbai?")
+        geocoded = [params["name"] for url, params in fetch.sent if url == GEOCODING_URL]
+        self.assertEqual(geocoded, ["Bengaluru", "Mumbai"])
+
+
+class MarketTests(unittest.TestCase):
+    def setUp(self):
+        self.portfolio = make_portfolio()
+
+    def ask(self, text, fetch=None):
+        request, focus = self.portfolio.request(text)
+        return self.portfolio.answer(OnlineGateway(fetch=fetch or FakeFetch()).lookup(request), focus)
+
+    def test_market_questions_vs_local_ones(self):
+        for text in ("how are my investments doing today?", "how is Infosys doing?", "what's the Nifty at?",
+                     "TCS share price", "current value of my mutual fund"):
+            self.assertTrue(self.portfolio.is_market_question(text), text)
+        for text in ("what are my investments", "where did I work before infosys", "what is my EMI",
+                     "what is my current role"):
+            self.assertFalse(self.portfolio.is_market_question(text), text)
+
+    def test_only_the_owners_holdings_and_whole_watchlist_are_requested(self):
+        request, focus = self.portfolio.request("how is Infosys doing?")
+        self.assertEqual(request.symbols, ("INFY.NS", "^NSEI", "^BSESN"))  # same watchlist whatever was asked
+        self.assertEqual(request.fund_codes, ("120377",))
+        self.assertNotIn("WIPRO.NS", request.symbols)  # someone else's holding
+        self.assertEqual(focus, ["INFY.NS"])
+        self.assertIn("TCS.NS", self.portfolio.request("TCS share price")[0].symbols)
+
+    def test_holdings_never_leave_the_device(self):
+        fetch = FakeFetch()
+        self.ask("how are my investments doing?", fetch)
+        sent = fetch.sent_text()
+        for private in ("1750", "323.5", "25000", "10,234", "Infosys Ltd"):
+            self.assertNotIn(private, sent)
+
+    def test_values_and_gains_are_computed_locally(self):
+        reply = self.ask("how are my investments doing today?")
+        self.assertTrue(reply.startswith("From Yahoo Finance and AMFI, online: Nifty 50 is at 22,520.45, down 0.4 percent"))
+        self.assertIn("Your 10 Infosys shares are worth 10,234 rupees, 7,266 rupees below what you paid, "
+                      "down 41.5 percent.", reply)
+        self.assertIn("323.5 units of ICICI Prudential Balanced Advantage Fund are worth 27,303 rupees, "
+                      "2,303 rupees above", reply)
+        self.assertIn("In total these are worth 37,537 rupees, 4,963 rupees below the 42,500 you invested", reply)
+        self.assertTrue(reply.endswith("This is information, not investment advice."))
+
+    def test_focus_on_funds_indices_or_a_named_company(self):
+        fund = self.ask("what is the current value of my mutual fund?")
+        self.assertIn("NAV is 84.40 rupees, as of 8 October", fund)
+        self.assertNotIn("Infosys", fund)
+        self.assertNotIn("Computed on this device", self.ask("what's the Nifty at?"))
+        # The local name, not Yahoo's truncated "TATA CONSULTANCY SERV LT".
+        self.assertIn("Tata Consultancy Services is at 2,156.00 rupees, up 3.9 percent", self.ask("TCS share price?"))
+
+    def test_invalid_market_requests_are_refused_before_sending(self):
+        fetch = FakeFetch()
+        for request in (LookupRequest("market", symbols=("my salary",)), LookupRequest("market", fund_codes=("12ab",)),
+                        LookupRequest("market")):
+            with self.assertRaises(LookupUnavailable):
+                OnlineGateway(fetch=fetch).lookup(request)
+        self.assertEqual(fetch.sent, [])
+
+    def test_stale_prices_are_reused_and_labelled(self):
+        now = [1_800_000_000.0]
+        fetch = FakeFetch()
+        gateway = OnlineGateway(fetch=fetch, clock=lambda: now[0])
+        request, focus = self.portfolio.request("how is Infosys doing?")
+        gateway.lookup(request)
+        now[0] += 3600  # the cache has expired, and now the network is down
+        fetch.fail = True
+        reply = self.portfolio.answer(gateway.lookup(request), focus)
+        self.assertIn("I couldn't refresh them.", reply)
+        self.assertIn("Infosys is at 1,023.40 rupees", reply)
+
+    def test_assistant_answers_without_the_model(self):
+        llm = FakeLLM()
+        assistant, indicator, _ = make_assistant(llm=llm, portfolio=self.portfolio)
+        reply, out = quietly(assistant.respond, "how is Infosys doing?")
+        self.assertIn("Computed on this device: Your 10 Infosys shares", reply)
+        self.assertEqual(llm.calls, [])
+        self.assertIn("[ONLINE] sent only symbols=['INFY.NS', '^NSEI', '^BSESN']", out)
+        self.assertIn(IndicatorState.ONLINE, indicator.states)
+
+    def test_switched_off_market_is_answered_from_records(self):
+        llm = FakeLLM("From your records, your Infosys shares were worth 18,800 rupees.")
+        fetch = FakeFetch()
+        gateway = OnlineGateway(fetch=fetch, kinds=("weather", "news"))
+        assistant, _, _ = make_assistant(llm=llm, gateway=gateway, portfolio=self.portfolio)
+        quietly(assistant.respond, "how is my monthly income doing today?")
+        quietly(assistant.respond, "how is Infosys doing?")
+        self.assertEqual(fetch.sent, [])
+
+    def test_unreachable_market_falls_back_to_records_with_a_warning(self):
+        assistant, _, _ = make_assistant(
+            llm=FakeLLM("Your monthly income is 85000."),
+            gateway=OnlineGateway(fetch=FakeFetch(fail=True)),
+            portfolio=self.portfolio,
+        )
+        reply, _ = quietly(assistant.respond, "how is my monthly income and my investments doing today?")
+        self.assertTrue(reply.startswith("I couldn't get live prices, so this is from your saved records"))
+
+
+class NewsTests(unittest.TestCase):
+    def test_topic_is_matched_locally_and_never_sent(self):
+        fetch = FakeFetch()
+        OnlineGateway(fetch=fetch).lookup(news_request("any news about TCS?").request)
+        self.assertNotIn("TCS", fetch.sent_text())
+        self.assertTrue(all(params == {} for _, params in fetch.sent))
+        assistant, _, _ = make_assistant(gateway=OnlineGateway(fetch=FakeFetch()))
+        reply, out = quietly(assistant.respond, "any news about TCS?")
+        self.assertIn("the latest headlines about TCS. One: TCS builds higher bench.", reply)
+        self.assertNotIn("Coal", reply)
+        self.assertIn("(topic not sent)", out)
+
+    def test_every_topic_word_must_match(self):
+        assistant, _, _ = make_assistant(gateway=OnlineGateway(fetch=FakeFetch()))
+        reply, _ = quietly(assistant.respond, "news about my favourite cricket team")
+        self.assertTrue(reply.startswith("I found no headlines about cricket team"))
+
+    def test_general_and_feed_specific_news(self):
+        self.assertEqual(news_request("what is the news today").request.feeds, ("india", "world"))
+        business = news_request("latest business news")
+        self.assertEqual((business.request.feeds, business.label), (("business",), "business"))
+        assistant, _, _ = make_assistant(gateway=OnlineGateway(fetch=FakeFetch()))
+        reply, _ = quietly(assistant.respond, "latest business news")
+        self.assertTrue(reply.startswith("From The Hindu, online: the latest business headlines. One: Coal supplies rise 36%."))
+
+    def test_only_built_in_feeds_and_switch(self):
+        with self.assertRaises(LookupUnavailable):
+            OnlineGateway(fetch=FakeFetch()).lookup(LookupRequest("news", feeds=("https://example.com/rss",)))
+        assistant, _, _ = make_assistant(gateway=OnlineGateway(fetch=FakeFetch(), kinds=("weather", "market")))
+        reply, _ = quietly(assistant.respond, "latest news")
+        self.assertIn("Online news lookups are switched off.", reply)
 
 
 class CommandRecordingTests(unittest.TestCase):
@@ -437,21 +895,33 @@ class CommandRecordingTests(unittest.TestCase):
 
 class WakePhraseTests(unittest.TestCase):
     def setUp(self):
-        self.wake = WakePhrase("hey jarvis")
+        self.wake = WakePhrase("hey sam")
 
     def test_request_after_wake_phrase(self):
-        self.assertEqual(self.wake.strip("Hey Jarvis, what's the weather today?"), "What's the weather today?")
-        self.assertEqual(self.wake.strip("Jarvis, what is my EMI"), "What is my EMI")
-        self.assertEqual(self.wake.strip("OK Jarvis."), "")
+        self.assertEqual(self.wake.strip("Hey Sam, what's the weather today?"), "What's the weather today?")
+        self.assertEqual(self.wake.strip("hi sam what is my EMI"), "What is my EMI")  # no pause, request word
+        self.assertEqual(self.wake.strip("OK Sam."), "")
 
     def test_other_speech_is_not_a_request(self):
-        for text in ("I was telling Jarvis fans", "Hey, are you coming to dinner?", "Jarvisville is nice", ""):
-            self.assertIsNone(self.wake.strip(text))
+        for text in (
+            "Sam is coming for dinner tonight.",  # greeting required for "hey sam"
+            "Sam, where did I park?",
+            "Hey, Sam called about the meeting.",  # name not addressed
+            "I saw Sam at the gym yesterday.",
+            "Hey Samantha, hi",
+            "Hey, are you coming to dinner?",
+            "",
+        ):
+            self.assertIsNone(self.wake.strip(text), text)
+
+    def test_phrase_without_greeting_needs_none(self):
+        self.assertEqual(WakePhrase("jarvis").strip("Jarvis, what is my EMI?"), "What is my EMI?")
 
     def test_custom_phrase(self):
         wake = WakePhrase("hey computer")
         self.assertEqual(wake.name, "computer")
-        self.assertEqual(wake.strip("Computer, lights on"), "Lights on")
+        self.assertEqual(wake.strip("Hey computer, lights on"), "Lights on")
+        self.assertIsNone(wake.strip("Computer, lights on"))  # the phrase has a greeting, so one is required
 
     def test_sleep_commands(self):
         self.assertTrue(is_sleep_command("That's all."))
@@ -475,7 +945,7 @@ class ConversationTests(unittest.TestCase):
 
     def test_wake_phrase_then_follow_ups_without_it(self):
         source, capture, _, indicator = conversation(
-            ["Hey Jarvis, what is my EMI?", "And my monthly income?"]
+            ["Hey Sam, what is my EMI?", "And my monthly income?"]
         )
         self.assertEqual(quietly(source.next_utterance)[0], "What is my EMI?")
         self.assertTrue(source.awake)
@@ -484,13 +954,13 @@ class ConversationTests(unittest.TestCase):
         self.assertEqual(indicator.states[-2:], [IndicatorState.LISTENING, IndicatorState.THINKING])
 
     def test_bare_wake_phrase_starts_listening(self):
-        source, _, _, _ = conversation(["Hey Jarvis!", "What is my EMI?"])
+        source, _, _, _ = conversation(["Hey Sam!", "What is my EMI?"])
         self.assertEqual(quietly(source.next_utterance)[0], "")
         self.assertTrue(source.awake)
         self.assertEqual(quietly(source.next_utterance)[0], "What is my EMI?")
 
     def test_silence_ends_the_conversation(self):
-        source, _, _, _ = conversation(["Hey Jarvis, what is my EMI?"], seconds=(1, 0))
+        source, _, _, _ = conversation(["Hey Sam, what is my EMI?"], seconds=(1, 0))
         quietly(source.next_utterance)
         result, out = quietly(source.next_utterance)
         self.assertEqual(result, "")
@@ -498,19 +968,19 @@ class ConversationTests(unittest.TestCase):
         self.assertIn("[SLEEP] no follow-up for 30 s", out)
 
     def test_sleep_command_ends_the_conversation(self):
-        source, _, _, _ = conversation(["Hey Jarvis, what is my EMI?", "That's all, thanks."])
+        source, _, _, _ = conversation(["Hey Sam, what is my EMI?", "That's all, thanks."])
         quietly(source.next_utterance)
         source.transcriber.texts = ["That's all, thanks."]
         self.assertEqual(quietly(source.next_utterance)[0], "")
         self.assertFalse(source.awake)
 
     def test_wake_phrase_with_stop_never_exits_the_app(self):
-        source, _, _, _ = conversation(["Hey Jarvis, stop."])
+        source, _, _, _ = conversation(["Hey Sam, stop."])
         self.assertEqual(quietly(source.next_utterance)[0], "")
         self.assertFalse(source.awake)
 
     def test_muting_ends_the_conversation(self):
-        source, _, _, indicator = conversation(["Hey Jarvis, what is my EMI?"])
+        source, _, _, indicator = conversation(["Hey Sam, what is my EMI?"])
         quietly(source.next_utterance)
         source.mute.set_muted(True)
         quietly(source.next_utterance)
@@ -524,7 +994,7 @@ class ConversationTests(unittest.TestCase):
 
     def test_long_request_is_transcribed_in_full_after_waking(self):
         source, _, transcriber, _ = conversation(
-            ["Hey Jarvis, when does", "Hey Jarvis, when does my car insurance expire?"], seconds=(6,)
+            ["Hey Sam, when does", "Hey Sam, when does my car insurance expire?"], seconds=(6,)
         )
         self.assertEqual(quietly(source.next_utterance)[0], "When does my car insurance expire?")
         self.assertEqual(transcriber.lengths, [3.0, 6.0])

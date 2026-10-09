@@ -36,8 +36,9 @@ def is_allowed_cloud_lookup(question: str) -> bool:
     return not any(term in normalized for term in DISALLOWED_CONTEXT_TERMS)
 
 
-def should_fallback(response: str) -> bool:
-    """Detect empty, uncertain, or non-answer responses."""
+def is_uncertain(response: str) -> bool:
+    """Empty, uncertain, or non-answer responses. They are spoken as they are, but not
+    remembered as facts, and uncertain weather advice is dropped."""
     normalized = response.casefold()
     if not normalized.strip():
         return True
@@ -47,10 +48,10 @@ def should_fallback(response: str) -> bool:
 
 
 def require_local_answer(response: str) -> str:
-    """Return a safe fallback when the local model declines or is uncertain."""
-    if should_fallback(response):
-        return LOCAL_FALLBACK_ANSWER
-    return response
+    """Replace an empty reply with the fallback. A refusal in the model's own words
+    ("...not recorded in the provided information") is kept: it says more than the
+    generic fallback, which used to overwrite any reply containing "cannot"."""
+    return response if response.strip() else LOCAL_FALLBACK_ANSWER
 
 
 def redact_for_log(text: str) -> str:

@@ -55,9 +55,10 @@ companion needs about 1.1 GB:
 | LLM KV cache (`LLM_CONTEXT=2048`) | 224 MB |
 | LLM compute buffers | ~150 MB |
 | Whisper `tiny.en` (int8) + runtime | ~225 MB |
+| Memory embedding model (all-MiniLM-L6-v2 int8) | ~90 MB |
 | Python, NumPy, audio | ~100 MB |
 
-Raspberry Pi OS Lite itself uses about 250 MB, leaving over 2 GB free for the
+Raspberry Pi OS Lite itself uses about 250 MB, leaving about 2 GB free for the
 planned Piper TTS voice. Check with `free -h` while the assistant
 is running.
 
@@ -117,6 +118,7 @@ so the time is mostly downloads (about 130 MB of packages and 470 MB of models).
 | Virtual environment | Creates `.venv/` in the project root (reused if present) |
 | Python packages | Installs `requirements.txt` (faster-whisper, llama-cpp-python, sounddevice, numpy, scipy, pyttsx3) |
 | Language model | Downloads `Qwen3-0.6B-Q4_K_M.gguf` (~397 MB) from `huggingface.co/unsloth/Qwen3-0.6B-GGUF` into `models/llm/`, resumes interrupted downloads, and verifies the SHA-256 checksum |
+| Memory embedding model | Downloads all-MiniLM-L6-v2 int8 (`model_qint8_arm64.onnx`, ~23 MB, Apache-2.0) and its tokenizer from a pinned Hugging Face revision into `models/embedding/minilm/`, verifying each SHA-256 |
 | Speech model | Caches the Whisper model: `tiny.en` on a Pi, `base.en` elsewhere |
 | Tests | Runs the unit test suite |
 
@@ -210,8 +212,14 @@ whatever the card needs.
 ## 5. Run the assistant
 
 ```bash
-MIC_DEVICE=<index> scripts/run.sh
+scripts/run.sh
 ```
+
+The microphone is selected automatically and shown at start-up (`(selected)`): the
+system default input, or, when there is none (common on a Pi, which has no built-in
+microphone), the first device that looks like a real microphone (USB, ReSpeaker, "mic"),
+skipping loopback and monitor inputs. To choose another, set `MIC_DEVICE` to its index or
+part of its name, e.g. `MIC_DEVICE=USB scripts/run.sh`.
 
 | Option | Effect |
 |---|---|
@@ -227,13 +235,44 @@ The console shows `[LED] IDLE` while the device waits for the wake phrase. Speec
 that doesn't start with it is dropped (`[IDLE] speech ignored`), and its text is never
 shown or kept.
 
-1. Say **"Hey Jarvis, what is my EMI?"** in one breath (or "Hey Jarvis", then the
-   question). You'll see `[WAKE] 'hey jarvis' heard` and `[LED] LISTENING`.
+1. Say **"Hey Sam, what is my EMI?"** in one breath (or "Hey Sam", then the
+   question). You'll see `[WAKE] 'hey sam' heard` and `[LED] LISTENING`. Always use a
+   greeting ("Hey/Hi/OK Sam"): "Sam, …" alone is ignored so that conversations
+   *about* someone called Sam don't wake the device.
 2. Ask follow-ups **without** the wake phrase: "And when does my car insurance expire?"
 3. Say **"That's all, thanks"**, or stay quiet for 30 s: `[SLEEP] ...` and back to `IDLE`.
 
 If it doesn't wake, check what Whisper heard: run with `--no-wake-word` and look at the
 `You:` line. Pick a phrase it spells consistently (configuration.md, *Wake phrase*).
+
+### Memory
+
+```
+You: Remember that I parked on level B2
+Assistant: Okay, I'll remember that you parked on level B2.
+You: what is my monthly income
+You: and my wife's?                      <- uses the previous question
+```
+
+Restart the assistant, then ask "Where did I park?": "On 9 October you told me that
+you parked on level B2." The console shows `[MEMORY] using 1 remembered item(s)`
+whenever memory contributes. "Forget that" and "Forget everything" erase it.
+
+### Share market and news
+
+```
+You: how are my investments doing today?
+[ONLINE] sent only symbols=['INFY.NS', '^NSEI', '^BSESN'] fund codes=['120377']
+[LOCAL] computing values and gains from your holdings on-device
+Assistant: From Yahoo Finance and AMFI, online: Nifty 50 is at ... Computed on this device:
+           Your 10 Infosys shares are worth ... This is information, not investment advice.
+
+You: any news about TCS?
+[ONLINE] fetched feeds=['business', 'india', 'technology', 'world'] (topic not sent)
+[LOCAL] filtering 214 headlines for the topic on-device
+```
+
+Switch either off with `ONLINE_MARKET=0` or `ONLINE_NEWS=0`.
 
 ### Online lookup
 
@@ -253,14 +292,12 @@ service and won't guess, while personal questions keep working.
 
 Stop with `Ctrl+C` (or type `exit` in `--text` mode). Spoken "exit" or "goodbye" only ends the current conversation.
 
-To avoid passing `MIC_DEVICE` each time, add it to your shell profile:
+To keep a choice, add it to your shell profile; a name is more stable than an index,
+which can change when devices are plugged in:
 
 ```bash
-echo 'export MIC_DEVICE=1' >> ~/.bashrc
+echo 'export MIC_DEVICE=ReSpeaker' >> ~/.bashrc
 ```
-
-If no `MIC_DEVICE` is set and the program runs without a terminal (e.g. as a
-service), it uses the system default microphone instead of prompting.
 
 All tunable settings are listed in [configuration.md](configuration.md).
 
@@ -306,8 +343,9 @@ curl -fL -o models/llm/Qwen3-0.6B-Q4_K_M.gguf \
 sha256sum models/llm/Qwen3-0.6B-Q4_K_M.gguf     # macOS: shasum -a 256
 # expected: ac2d97712095a558e31573f62f466a3f9d93990898b0ec79d7c974c1780d524a
 
-# Run (the first voice run downloads the Whisper model, so leave HF_HUB_OFFLINE
-# unset for that one run, or use setup.sh which caches it)
+# Cache the Whisper model once (the app itself never downloads it)
+.venv/bin/python -c "from faster_whisper import WhisperModel; WhisperModel('tiny.en', device='cpu', compute_type='int8')"
+
 .venv/bin/python src/main.py --text
 ```
 
@@ -388,9 +426,10 @@ not recommended.
 | `set: Illegal option -o pipefail` | Old scripts run with `sh` (dash). Pull the latest version, which re-runs itself under bash, or start it with `bash scripts/run.sh` |
 | `bash\r: No such file or directory` / `$'\r': command not found` | The scripts have Windows line endings. Pull again (`.gitattributes` now forces LF) or fix in place: `sed -i 's/\r$//' scripts/*.sh` |
 | `Do not run setup with sudo` | Run `scripts/setup.sh` as your normal user; it calls `sudo` only for `apt`. If a root-owned `.venv` exists from an earlier sudo run, remove it with `sudo rm -r .venv` and re-run setup |
-| Error mentioning `HF_HUB_OFFLINE` or "cannot find the requested files in the local cache" | That Whisper size was never cached: run setup with the same `WHISPER_MODEL_SIZE` (section 8) |
+| `Whisper model '...' is not downloaded` | That Whisper size was never cached; the app never downloads models itself. Run setup with the same `WHISPER_MODEL_SIZE` (section 8) |
 | `No microphone input devices were found` | Check `arecord -l`; add your user to the audio group: `sudo usermod -aG audio $USER`, then log out and in |
-| `Device N is not an available microphone` | `MIC_DEVICE` points at an output-only device; pick one whose `--list-mics` entry shows at least `1 in` |
+| `MIC_DEVICE=... is not an available microphone` / `No microphone name contains ...` | Check `scripts/run.sh --list-mics` and use an index or name of a device with at least `1 in`, or unset `MIC_DEVICE` for automatic selection |
+| The wrong microphone is selected | Set `MIC_DEVICE` to part of the right device's name, e.g. `MIC_DEVICE=USB` |
 | It never starts recording | Your mic is quiet: lower `SPEECH_RMS_THRESHOLD` (e.g. `200`) |
 | Every recording runs the full 15 s | Background noise never drops below the threshold: raise `SPEECH_RMS_THRESHOLD` (e.g. `800`) |
 | `microphone input overflowed` warnings | The CPU is overloaded: close other programs, check `vcgencmd get_throttled` |

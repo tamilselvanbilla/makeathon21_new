@@ -7,7 +7,7 @@ and tuning without editing code. Set them per run:
 WHISPER_MODEL_SIZE=base.en LLM_MAX_TOKENS=96 scripts/run.sh
 ```
 
-or persistently in `~/.bashrc` (`export MIC_DEVICE=1`).
+or persistently in `~/.bashrc` (`export MIC_DEVICE=USB`).
 
 Defaults marked **Pi / other** differ by platform. A Raspberry Pi is detected from
 `/proc/device-tree/model`. "Cores" means the number of CPU cores (4 on a Pi 4).
@@ -38,7 +38,7 @@ Defaults marked **Pi / other** differ by platform. A Raspberry Pi is detected fr
 
 | Variable | Default | Description |
 |---|---|---|
-| `MIC_DEVICE` | *(prompt, or system default when headless)* | Input device index from `scripts/run.sh --list-mics` |
+| `MIC_DEVICE` | *(automatic)* | Index or part of the name of the input device (`scripts/run.sh --list-mics`). Unset: the system default input, else the first USB/ReSpeaker/"mic" device that isn't a loopback or monitor |
 | `SPEECH_RMS_THRESHOLD` | `450` | Loudness that counts as speech (int16 RMS). Lower for quiet mics, higher for noisy rooms |
 | `SILENCE_SECONDS` | `0.8` | Silence that ends an utterance |
 | `MAX_RECORD_SECONDS` | `15` | Hard cap on one utterance |
@@ -69,10 +69,34 @@ the device's native rate and resampled.
 | Variable | Default | Description |
 |---|---|---|
 | `ONLINE_LOOKUPS` | `1` | `0` disables the online gateway entirely (same as `--offline`) |
+| `ONLINE_WEATHER` | `1` | `0` switches off weather lookups |
+| `ONLINE_MARKET` | `1` | `0` switches off share prices and fund NAVs; portfolio questions are then answered from the saved records |
+| `ONLINE_NEWS` | `1` | `0` switches off news headlines |
 | `DEFAULT_PLACE` | `Bengaluru` | Place used for weather questions that don't name one ("will it rain today?") |
+| `MARKET_SYMBOLS_FILE` | `knowledge_base/market_symbols.json` | Company and index names the assistant may look up, mapped to symbols |
 
-Only weather is supported (Open-Meteo, no API key). The question is parsed on the
-device and only the place name and the day ("today"/"tomorrow") are sent.
+Startup prints which are on, e.g. `Online lookups: market, news, weather`. No source needs an
+API key. What each sends:
+
+| Feature | Source | Sent | Kept on the device |
+|---|---|---|---|
+| Weather | Open-Meteo | Place name, then its coordinates | The question |
+| Market | Yahoo Finance (prices; **unofficial endpoint**, may change), mfapi.in (AMFI's official NAVs) | The **whole watchlist** of symbols and fund codes, whatever was asked | Quantities, prices paid, all values and gains, the question |
+| News | The Hindu (business, national, technology), BBC News (world) RSS | Nothing but the fixed feed address | The topic: headlines are filtered on the device |
+
+Results are cached (prices 5 min, NAVs 6 h, news 15 min, weather 10 min). If a refresh fails,
+the cached copy is used and the reply says when it was fetched.
+
+### Market data
+
+Holdings come from `knowledge_base/personal_data.json`: a `stock` record needs `ticker`
+(Yahoo symbol, e.g. `INFY.NS`), `quantity` and `purchase_price`; a `mutual_fund` record needs
+`scheme_code` (AMFI code, e.g. `120377`, findable at `https://api.mfapi.in/mf/search?q=<name>`),
+`units` and `investment_amount`. Only the primary user's holdings are used.
+
+`knowledge_base/market_symbols.json` maps spoken names to symbols for companies you don't
+hold ("TCS" → `TCS.NS`) and lists the `indices` always fetched (Nifty 50, Sensex). Add
+entries to ask about more companies; the longest name is the one spoken in replies.
 
 ## Wake phrase and conversation
 
@@ -82,12 +106,15 @@ downloaded and there is no extra licence (Whisper and faster-whisper are MIT).
 | Variable | Default | Description |
 |---|---|---|
 | `WAKE_WORD` | `1` | `0` treats any speech as a request (same as `--no-wake-word`) |
-| `WAKE_PHRASE` | `hey jarvis` | Any phrase. The greeting is flexible: with `hey jarvis`, "Jarvis", "Hi Jarvis" and "OK Jarvis" also work |
+| `WAKE_PHRASE` | `hey sam` | Any phrase. With a greeting in the phrase, any greeting works ("Hey Sam", "Hi Sam", "OK Sam") but one is required; a phrase without one (`jarvis`) is accepted on its own |
 | `CONVERSATION_TIMEOUT` | `30` | Seconds of silence after a reply before it needs the wake phrase again |
 | `WHISPER_HOTWORDS` | `EMI PAN Aadhaar` | Words Whisper should favour. The wake name and `DEFAULT_PLACE` are added automatically |
 
 **Choosing a wake phrase:** use a name Whisper spells consistently, i.e. real words
-or common names ("hey computer", "hey jarvis", "hello friday"). Invented names get
+or common names ("hey sam", "hey computer", "hello friday"). With a common name like
+Sam, keep the greeting in the phrase: then "Sam is coming for dinner" or "Hey, Sam
+called" don't wake the device, because the name must be greeted and addressed (followed
+by a pause or a request such as "what…", "remind…"). Invented names get
 spelled differently each time and won't match. Check yours with
 `scripts/run.sh --mic-test`, then
 `cd src && ../.venv/bin/python -m companion.audio.stt ../audio/test.wav`.
@@ -95,6 +122,48 @@ spelled differently each time and won't match. Check yours with
 **Ending a conversation:** "that's all", "stop listening", "go to sleep", "goodbye",
 "thank you" or "no thanks" put it back to sleep, as do 30 s of silence and the mute
 switch. By voice it never shuts down; `Ctrl+C` stops the program.
+
+## Memory
+
+| Variable | Default | Description |
+|---|---|---|
+| `MEMORY` | `1` | `0` keeps memory in RAM for the current session only; nothing is written to disk |
+| `MEMORY_FILE` | `data/memory.sqlite3` | Where notes and past conversations are stored (git-ignored) |
+| `MEMORY_RETENTION_DAYS` | `30` | Older entries are deleted at startup |
+| `FOLLOW_UP_MINUTES` | `10` | How recent the previous question must be for "and my wife's?" to build on it |
+| `MEMORY_TOP_K` | `3` | Remembered items given to the model per question |
+| `MEMORY_EMBEDDINGS` | `1` | `0` uses keyword search only (no embedding model loaded, ~90 MB less RAM) |
+| `EMBEDDING_MODEL` | `minilm-int8` | `minilm-int8`, `minilm` or `bge-small` (see *Choosing the embedding model*) |
+| `EMBEDDING_DIR` | `models/embedding` | Folder with the embedding models |
+| `MEMORY_MIN_SIMILARITY` | `0.35` | Cosine similarity a note needs to match by meaning alone. Lower finds more paraphrases but more wrong notes |
+
+### Choosing the embedding model
+
+Measured with `scripts/eval_memory_retrieval.py` on 15 notes, 34 questions that should
+find a note and 13 that must not (on a laptop, 2 threads):
+
+| Method | Finds | Rejects | Download | RAM | Per question |
+|---|---|---|---|---|---|
+| Keywords only (`MEMORY_EMBEDDINGS=0`) | 79% | 62% | — | — | <1 ms |
+| **Keywords + `minilm-int8` (default)** | **94%** | 62% | 23 MB | ~90 MB | ~1 ms |
+| Keywords + `minilm` | 94% | 62% | 90 MB | ~185 MB | ~2 ms |
+| Keywords + `bge-small` (threshold 0.65) | 79% | 85% | 133 MB | ~230 MB | ~7 ms |
+
+`bge-small` rejects near-misses better only in a narrow threshold band (0.60 → 54%,
+0.65 → 85%), at 2.5× the RAM. No method reliably rejects near-misses ("wife's
+birthday" when only mom's is stored), so those answers are hedged instead. To compare
+models on your device, download `minilm` or `bge-small` into `models/embedding/` and run
+`.venv/bin/python scripts/eval_memory_retrieval.py --models minilm-int8 bge-small`.
+
+Voice commands:
+
+| Say | Effect |
+|---|---|
+| "Remember (that) …", "Note (that) …", "Make a note …" | Saves a note; confirmed as "Okay, I'll remember that you …" |
+| "Forget that", "Forget the last thing", "Delete that" | Deletes the most recent note or exchange |
+| "Forget everything", "Clear your memory" | Deletes all memory |
+
+To inspect memory on the device: `sqlite3 data/memory.sqlite3 "SELECT created, kind, question, answer FROM memory"`.
 
 ## Set by `scripts/run.sh`
 

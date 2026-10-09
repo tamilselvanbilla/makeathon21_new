@@ -95,7 +95,7 @@ class STTConfig:
 
 @dataclass(frozen=True)
 class CaptureConfig:
-    device: int | None
+    device: str | None  # index or part of the name; None = automatic
     sample_rate: int
     max_record_seconds: float
     max_wait_for_speech_seconds: float
@@ -106,7 +106,7 @@ class CaptureConfig:
     def from_env(cls) -> "CaptureConfig":
         device = os.getenv("MIC_DEVICE")
         return cls(
-            device=int(device) if device else None,
+            device=device or None,
             sample_rate=16_000,
             max_record_seconds=_env_float("MAX_RECORD_SECONDS", 15),
             max_wait_for_speech_seconds=_env_float("MAX_WAIT_FOR_SPEECH_SECONDS", 30),
@@ -126,9 +126,41 @@ class WakeWordConfig:
         return cls(
             enabled=_env_bool("WAKE_WORD", True),
             # Detected in Whisper transcripts; any phrase Whisper spells reliably.
-            phrase=os.getenv("WAKE_PHRASE", "hey jarvis"),
+            phrase=os.getenv("WAKE_PHRASE", "hey sam"),
             # After waking, follow-ups need no wake phrase until this much silence.
             conversation_timeout=_env_float("CONVERSATION_TIMEOUT", 30),
+        )
+
+
+@dataclass(frozen=True)
+class MemoryConfig:
+    path: Path | None
+    retention_days: int
+    follow_up_minutes: float
+    top_k: int
+    embeddings: bool
+    embedding_model: str
+    embedding_dir: Path
+    min_similarity: float
+
+    @classmethod
+    def from_env(cls) -> "MemoryConfig":
+        return cls(
+            # MEMORY=0 keeps memory in RAM for the session only; nothing is written.
+            path=Path(os.getenv("MEMORY_FILE", str(PROJECT_ROOT / "data" / "memory.sqlite3")))
+            if _env_bool("MEMORY", True)
+            else None,
+            # Older notes and conversations are deleted at startup.
+            retention_days=_env_int("MEMORY_RETENTION_DAYS", 30),
+            # "And my wife's?" uses the previous question if it was this recent.
+            follow_up_minutes=_env_float("FOLLOW_UP_MINUTES", 10),
+            top_k=_env_int("MEMORY_TOP_K", 3),
+            # Semantic search finds paraphrases ("power tool" -> drill); see
+            # scripts/eval_memory_retrieval.py for the measurements behind these defaults.
+            embeddings=_env_bool("MEMORY_EMBEDDINGS", True),
+            embedding_model=os.getenv("EMBEDDING_MODEL", "minilm-int8"),
+            embedding_dir=Path(os.getenv("EMBEDDING_DIR", str(PROJECT_ROOT / "models" / "embedding"))),
+            min_similarity=_env_float("MEMORY_MIN_SIMILARITY", 0.35),
         )
 
 
@@ -158,7 +190,10 @@ class AppConfig:
     capture: CaptureConfig
     wake_word: WakeWordConfig
     knowledge: KnowledgeConfig
+    memory: MemoryConfig
     online_lookups_enabled: bool
+    online_kinds: tuple[str, ...]
+    market_symbols_file: Path
     default_place: str
     tts_enabled: bool
 
@@ -170,7 +205,17 @@ class AppConfig:
             capture=CaptureConfig.from_env(),
             wake_word=WakeWordConfig.from_env(),
             knowledge=KnowledgeConfig.from_env(),
+            memory=MemoryConfig.from_env(),
             online_lookups_enabled=_env_bool("ONLINE_LOOKUPS", True),
+            # Each online feature can be switched off on its own; ONLINE_LOOKUPS=0 disables all.
+            online_kinds=tuple(
+                kind
+                for kind, variable in (("weather", "ONLINE_WEATHER"), ("market", "ONLINE_MARKET"), ("news", "ONLINE_NEWS"))
+                if _env_bool(variable, True)
+            ),
+            market_symbols_file=Path(
+                os.getenv("MARKET_SYMBOLS_FILE", str(PROJECT_ROOT / "knowledge_base" / "market_symbols.json"))
+            ),
             # Place used for weather questions that don't name one.
             default_place=os.getenv("DEFAULT_PLACE", "Bengaluru"),
             tts_enabled=_env_bool("TTS_ENABLED", True),

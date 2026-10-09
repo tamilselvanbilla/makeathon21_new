@@ -28,7 +28,9 @@
       "owner": "John",
       "record_type": "mutual_fund",
       "source": "Test sample",
-      "scheme": "Balanced Advantage Fund",
+      "scheme": "ICICI Prudential Balanced Advantage Fund",
+      "scheme_code": 120377,
+      "units": 323.5,
       "investment_amount": 25000,
       "current_value": 27300,
       "asset_type": "Mutual Fund"
@@ -38,6 +40,7 @@
       "record_type": "stock",
       "source": "Test sample",
       "company": "Infosys Ltd.",
+      "ticker": "INFY.NS",
       "quantity": 10,
       "purchase_price": 1750,
       "current_price": 1880,

@@ -1,27 +1,23 @@
-import sounddevice as sd
-from scipy.io.wavfile import write
+"""Record a 5-second test clip to audio/test.wav with the automatically selected
+microphone (set MIC_DEVICE to an index or part of a name to choose another)."""
+
+import os
+import sys
 from pathlib import Path
 
+import sounddevice as sd
+from scipy.io.wavfile import write
+
 project_dir = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(project_dir / "src"))
+from companion.audio.capture import choose_input_device  # noqa: E402
+
 output_path = project_dir / "audio" / "test.wav"
 output_path.parent.mkdir(parents=True, exist_ok=True)
 
 duration = 5
 
-input_devices = [
-    (index, info)
-    for index, info in enumerate(sd.query_devices())
-    if info["max_input_channels"] > 0
-]
-default_device = sd.default.device[0]
-
-print("Available microphones:")
-for index, info in input_devices:
-    default_label = " (default)" if index == default_device else ""
-    print(f"  {index}: {info['name']}{default_label}")
-
-choice = input(f"Microphone index [Enter for {default_device}]: ").strip()
-device = default_device if not choice else int(choice)
+device = choose_input_device(os.getenv("MIC_DEVICE") or None)
 device_info = sd.query_devices(device, "input")
 sample_rate = int(device_info["default_samplerate"])
 channels = 1

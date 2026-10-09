@@ -5,7 +5,7 @@ The microphone is read as a stream of 80 ms frames of 16 kHz int16 audio.
 without hardware.
 """
 
-import sys
+import re
 from contextlib import closing
 from typing import Callable, Iterable, Iterator
 
@@ -55,36 +55,56 @@ def record_command(
     return np.concatenate(chunks).astype(np.float32) / 32768.0
 
 
-def choose_input_device(configured: int | None) -> int:
-    """Show microphones and select the configured, chosen, or default input."""
+# Names that suggest a real microphone, and names of inputs that are not one.
+LIKELY_MIC = re.compile(r"usb|respeaker|seeed|mic|headset|webcam", re.IGNORECASE)
+NOT_A_MIC = re.compile(r"monitor|loopback|virtual|blackhole|soundflower|hdmi", re.IGNORECASE)
+
+
+def pick_microphone(inputs: list[tuple[int, str]], default: int | None, configured: str | None) -> int:
+    """Choose an input without asking.
+
+    1. MIC_DEVICE, as an index ("1") or part of the name ("USB", "ReSpeaker");
+    2. the system default input;
+    3. the first input that looks like a real microphone (USB, ReSpeaker, "mic"),
+       skipping loopback/monitor devices; a Pi has no built-in microphone, so its
+       default is often unset or wrong;
+    4. the first input.
+    """
+    indexes = [index for index, _ in inputs]
+    if configured:
+        if configured.strip().isdigit():
+            if int(configured) in indexes:
+                return int(configured)
+            raise RuntimeError(f"MIC_DEVICE={configured} is not an available microphone.")
+        matches = [index for index, name in inputs if configured.casefold() in name.casefold()]
+        if matches:
+            return matches[0]
+        raise RuntimeError(f"No microphone name contains MIC_DEVICE={configured!r}.")
+    if default is not None and default in indexes:
+        return default
+    likely = [index for index, name in inputs if LIKELY_MIC.search(name) and not NOT_A_MIC.search(name)]
+    real = [index for index, name in inputs if not NOT_A_MIC.search(name)]
+    return (likely or real or indexes)[0]
+
+
+def choose_input_device(configured: str | None) -> int:
+    """List microphones and select one automatically (see pick_microphone)."""
     import sounddevice as sd
 
     inputs = [
-        (index, info)
+        (index, info["name"])
         for index, info in enumerate(sd.query_devices())
         if info["max_input_channels"] > 0
     ]
     if not inputs:
         raise RuntimeError("No microphone input devices were found.")
 
-    default_device = sd.default.device[0]
+    default = sd.default.device[0]
+    selected = pick_microphone(inputs, default if default is not None and default >= 0 else None, configured)
     print("Available microphones:")
-    for index, info in inputs:
-        marker = " (default)" if index == default_device else ""
-        print(f"  {index}: {info['name']}{marker}")
-
-    fallback = default_device if default_device is not None and default_device >= 0 else inputs[0][0]
-    if configured is not None:
-        selected = configured
-    elif sys.stdin.isatty():
-        choice = input(f"Microphone index [Enter for {fallback}]: ").strip()
-        selected = fallback if not choice else int(choice)
-    else:
-        # Headless (e.g. systemd on the Pi): never block waiting for input.
-        selected = fallback
-
-    if selected not in {index for index, _ in inputs}:
-        raise RuntimeError(f"Device {selected} is not an available microphone.")
+    for index, name in inputs:
+        marks = [mark for mark, on in (("default", index == default), ("selected", index == selected)) if on]
+        print(f"  {index}: {name}" + (f" ({', '.join(marks)})" if marks else ""))
     return selected
 
 

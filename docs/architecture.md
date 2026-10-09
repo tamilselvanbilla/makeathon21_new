@@ -76,14 +76,18 @@ stateDiagram-v2
 5. **Look up (optional).** `OnlineGateway.lookup` validates the query and calls a
    provider. If it cannot, the assistant says so and stops; it never lets the model
    guess real-time facts.
-6. **Retrieve.** `KnowledgeBase.search` finds personal records (details below). If
-   the question is personal ("my", "I", or a family member's name) and nothing
-   matches, the assistant answers "I couldn't find that in your personal records"
-   without calling the model.
+6. **Retrieve.** Memory commands ("remember that…", "forget that") are handled first,
+   without the model. A follow-up ("and my wife's?") is combined with the previous
+   question. `KnowledgeBase.search` finds personal records and `ConversationMemory.search`
+   finds notes and, for recall questions, past exchanges (details below). An answer
+   that comes only from a note is given directly from it. If the question is personal
+   and nothing matches anywhere, the assistant answers "I couldn't find that in your
+   personal records" without calling the model.
 7. **Reason locally.** `LocalLLM.chat` answers from the system prompt, question,
    owner-labelled records, and any online facts.
-8. **Check.** `require_local_answer` replaces empty or uncertain answers with an honest
-   fallback message.
+8. **Check.** `require_local_answer` replaces an empty answer with an honest
+   fallback message. Uncertain answers ("not recorded…") are spoken in the model's own
+   words but not remembered as facts.
 9. **Speak.** The `Speaker` says the reply; the indicator returns to `IDLE`.
 
 Any exception during steps 4–8 is logged, the user hears an apology, and the loop
@@ -104,10 +108,14 @@ continues, so an always-on device does not die on one bad request.
 | `companion/brain/prompts.py` | System prompt and prompt assembly | `SYSTEM_PROMPT`, `build_user_prompt` |
 | `companion/brain/policy.py` | What may go online; when to fall back | `is_allowed_cloud_lookup`, `require_local_answer` |
 | `companion/brain/knowledge.py` | Loads personal records and searches them (FTS5, owners, record-type focus) | `load_knowledge`, `KnowledgeBase`, `Match` |
+| `companion/brain/memory.py` | Notes, past exchanges, follow-ups, forgetting; SQLite on the device | `ConversationMemory`, `parse_memory_command`, `MemoryItem` |
+| `companion/brain/wake.py` | Wake phrase and sleep commands in transcripts | `WakePhrase`, `is_sleep_command` |
 | `companion/device/indicator.py` | Listening-light states | `IndicatorState`, `Indicator`, `ConsoleIndicator` |
 | `companion/device/mute.py` | Mute switch | `MuteSwitch`, `SoftwareMuteSwitch` |
 | `companion/device/tts.py` | Spoken output: espeak-ng + aplay on Linux (no sound server needed), pyttsx3 elsewhere | `Speaker`, `EspeakSpeaker`, `Pyttsx3Speaker`, `PrintSpeaker`, `make_speaker` |
-| `companion/online_gateway.py` | The only network exit | `OnlineGateway`, `LookupResult`, `LookupUnavailable` |
+| `companion/online_gateway.py` | The only network exit: weather, market, news; validation, allowlist, cache, per-feature switches | `OnlineGateway`, `LookupRequest`, `LookupResult`, `LookupUnavailable` |
+| `companion/brain/market.py` | Portfolio: which symbols to fetch, all values and gains computed locally | `Portfolio`, `Holding` |
+| `companion/brain/news.py` | Which feeds to fetch; topic filtering on the device | `news_request`, `headlines_reply` |
 | `companion/telemetry.py` | JSON timing log without content | `log_event`, `timed_event` |
 
 ## Knowledge retrieval
@@ -118,17 +126,66 @@ question:
 
 | Stage | What it does | Example |
 |---|---|---|
-| Terms | Drops filler words, adds synonyms from `SYNONYMS` | "EMI" → emi, installment, loan |
-| Match | Porter-stemmed full-text search, BM25-ranked | "loans" finds "Home Loan" |
+| Terms | Drops filler words (incl. everyday verbs, adverbs, pronouns: *taking, daily, now, under…*) and adds synonyms from `SYNONYMS` | "EMI" → emi, installment, loan; "medications" → prescription, dosage |
+| Match | Porter-stemmed full-text search, BM25-ranked, over each record's fields (`body`) and its category (`topic`) | "loans" finds "Home Loan"; "my medical records" finds all medical records |
 | Owner filter | "my"/"I" means the primary user (most frequent owner, or `PRIMARY_USER`); other people only when named (relation or name); "family" covers everyone; shared "family" records are always included | "my income" never returns the wife's salary |
-| Type focus | If a word names a record type, keep only that type | "passport" → passport record only |
-| Attribute check | If the question asks for an attribute (expiry, earnings, EMI…) that none of the selected records contain, return nothing | "when does my passport expire" → "not in your records", not a guessed date |
+| Coverage | A record is kept only if **it alone** covers every meaningful question word (the word or a synonym). Named things (companies, banks, models, places, and their acronyms) may be covered by any matching record, so they can point at another record | "when does my passport expire" → nothing (no record has both); "where did I work before Infosys" → the TCS job |
+| Category collisions | A word sharing its stem with a category name ("medications" / "medical" → `medic`) is matched through its synonyms only | "my medications" → the prescription, not every medical record |
+| Acronyms | Names of three or more capitalised words are also indexed by their initials | "SBI" → State Bank of India bond; "TCS" → Tata Consultancy Services |
+| Ranking | Records containing a named thing from the question first, then current before "previous …" records (unless the question says before/previous/earlier), then BM25 | "which insurer covers my Hero Splendor" → that bike; "where do I work" → current job |
 | Top-k | Keep at most `KNOWLEDGE_TOP_K` records (default 4) | Short prompts on the Pi |
 | Format | One line per record, labelled with category and owner, plus a note mapping synonyms | "Financial record of John's wife: …" |
+
+`tests/data/knowledge_retrieval_eval.json` holds 81 natural spoken questions (including
+real phrasings like "what are the medications I am taking daily?"), each with the record
+type it must find or `null` if it must find nothing; a unit test requires all of them
+except one documented limitation (see docs/benchmarks.md).
 
 The system prompt names the primary user, tells the model to address them as "you",
 states the currency (`CURRENCY`, default INR), and includes a one-line example answer,
 which a 0.6B model follows more reliably than rules.
+
+## Conversation memory
+
+`ConversationMemory` keeps text (never audio) in an FTS5 table in
+`data/memory.sqlite3`, one row per note or exchange, with a timestamp, and one
+embedding per row in a `vectors` table of the same file.
+
+**Hybrid search.** A stored item matches if it contains **every** meaningful word of
+the question (stemmed, with synonyms; marked `exact`), or if its embedding's cosine
+similarity is at least `MEMORY_MIN_SIMILARITY` (0.35). Exact matches rank first, then
+by similarity. Embeddings come from all-MiniLM-L6-v2 int8 run on onnxruntime
+(`brain/embeddings.py`, no extra packages); similarities are a NumPy dot product over
+the stored vectors, which takes well under a millisecond for hundreds of memories, so no
+vector database or SQLite extension is needed. Rows stored before embeddings were
+enabled are embedded at startup; vectors are deleted with their rows.
+
+**Why hybrid and not embeddings or GraphRAG alone:** measured in
+`scripts/eval_memory_retrieval.py` (see configuration.md, *Choosing the embedding
+model*), embeddings lift paraphrase recall from 79% to 94%, but no method separates
+near-misses ("wife's birthday" vs a note about mom's) because they *are* semantically
+similar. Keyword coverage tells the two apart cheaply, so it decides how confident the
+answer sounds. GraphRAG would need the 0.6B model to extract entities reliably and
+targets cross-document summaries, not lookups; the data's structure (owner → record
+type → fields) already gives the graph that matters.
+
+**Honest answers.** A note found only by meaning is answered with a hedge: "I'm not
+certain, but the closest thing I remember is: on 9 October you told me that mom's
+birthday is on 12 March." The note is quoted, never paraphrased by the model, so a
+near-miss is visible rather than invented. In the benchmark, all wrong matches were
+hedged.
+
+| Memory | Stored when | Used when |
+|---|---|---|
+| Note | "Remember (that) …" | Every question. If a note is the only match, the reply is built from it directly ("On 9 October you told me that you parked on level B2"), so a small model can't misquote it |
+| Exchange | A question got a real answer (honest "not in your records" or failed lookups are **not** stored, so they can't come back as facts) | Recall questions only ("did you…", "what did you tell me…", "earlier", "yesterday"), so old answers don't distract ordinary ones. "Yesterday" filters by date |
+| Previous exchange | Same | A follow-up starting with "and", "what about", "how about" within `FOLLOW_UP_MINUTES`; it is combined with the previous question for routing and search, and shown to the model. For weather, a newly named place replaces the old one ("what about in Mumbai?") |
+
+Entries older than `MEMORY_RETENTION_DAYS` are deleted at startup; "forget that" and
+"forget everything" delete on request. Knowledge search also refuses to answer when a
+meaningful word of the question appears in none of the matching records ("where is my
+car key" is not answered from a car record), so such questions fall through to memory
+or to an honest "not found".
 
 ## The online/offline boundary
 
@@ -136,11 +193,14 @@ which a 0.6B model follows more reliably than rules.
 |---|---|
 | Only the gateway may use the network | `test_only_gateway_imports_network_libraries` parses every module and fails if any other file imports `socket`, `urllib.request`, `http.client`, `requests`, `httpx`, `urllib3`, or `aiohttp` |
 | Neither audio nor the question can be sent | `OnlineGateway.lookup` accepts only a `LookupRequest(kind, place, day)` built locally by `parse_lookup`, and raises `TypeError` for anything else, including plain strings (tested with text, bytes and NumPy arrays) |
-| Only place names go out | `PLACE_PATTERN` rejects anything that isn't a short place name, e.g. "my salary is 85000" |
-| Only factual lookups go out | `route` sends a question online only if it is about weather/news/search and mentions no financial, medical, document, recording, personal, or private data; only weather is implemented |
+| Only public identifiers go out | Weather: `PLACE_PATTERN` (a short place name, not "my salary is 85000"). Market: `SYMBOL_PATTERN` and `FUND_CODE_PATTERN` (ticker symbols, numeric codes). News: only keys of the built-in `FEEDS`. Anything else is refused before sending |
+| Holdings never go out | `Portfolio.request` always sends the whole watchlist (the primary user's holdings plus indices), so the request doesn't reveal which holding was asked about; quantities and prices paid stay local, and values and gains are computed in Python, not by the LLM |
+| Topics never go out | News fetches whole feeds; `headlines_reply` keeps headlines containing every topic word |
+| Only factual lookups go out | Weather, market and news only; anything else (e.g. "search") is refused |
+| Replies show the boundary | "From Yahoo Finance and AMFI, online: … Computed on this device: …"; console `[ONLINE]`/`[LOCAL]` lines; the LED shows `ONLINE` |
 | Only known hosts are contacted | `check_host_allowed` validates each URL against `ALLOWED_HOSTS` |
-| Users can switch it off | `--offline` or `ONLINE_LOOKUPS=0` |
-| Models never phone home | `run.sh` sets `HF_HUB_OFFLINE=1` |
+| Users can switch it off | `--offline` or `ONLINE_LOOKUPS=0` for everything; `ONLINE_WEATHER`, `ONLINE_MARKET`, `ONLINE_NEWS` per feature |
+| Models never phone home | Whisper loads with `local_files_only=True` (without it, faster-whisper contacts huggingface.co at every start); the LLM and embedding models are plain local files; `run.sh` also sets `HF_HUB_OFFLINE=1` |
 | Online moments are visible | The indicator shows `ONLINE` only while the gateway is in use |
 
 ## Wake phrase
@@ -152,7 +212,7 @@ used for requests, and `brain/wake.py` checks the text.
 stateDiagram-v2
     [*] --> Asleep
     Asleep --> Asleep: speech without wake phrase (discarded)
-    Asleep --> Awake: "Hey Jarvis[, request]"
+    Asleep --> Awake: "Hey Sam[, request]"
     Awake --> Awake: request (no wake phrase needed)
     Awake --> Asleep: CONVERSATION_TIMEOUT of silence
     Awake --> Asleep: "that's all" / "stop listening" / "thank you"
@@ -161,7 +221,7 @@ stateDiagram-v2
 
 | Rule | Detail |
 |---|---|
-| Match | The transcript must **start** with the wake phrase; greetings are interchangeable ("Jarvis", "Hi Jarvis"). "I told Jarvis…" does not wake it |
+| Match | The transcript must **start** with a greeting and the name ("Hey Sam", "Hi Sam", "OK Sam"), and the name must be addressed: followed by a pause or a request word ("Hey Sam what's…"). "Sam is coming for dinner", "Hey, Sam called…" and "I saw Sam…" do not wake it |
 | Cost while asleep | Only the first `WAKE_CHECK_SECONDS` (3 s) of each utterance are transcribed; the full utterance is transcribed only after a match |
 | Accuracy | Whisper is given `hotwords` (wake name, EMI, PAN, Aadhaar, default place), which fixed "EMI" being heard as "UI" with `tiny.en` and caused no false wakes on silence, noise, or unrelated speech in testing |
 | Privacy | Ignored speech is transcribed in memory and discarded; its text is never printed, logged, or stored |
@@ -180,6 +240,7 @@ stateDiagram-v2
 | Models loaded once at startup | Loading takes seconds; per-request loading would dominate latency |
 | Stages run sequentially | STT and LLM each get all four cores instead of competing |
 | Lazy imports | Text mode and tests run without audio libraries; startup loads only what is used |
+| Memory: FTS5 + int8 MiniLM embeddings, NumPy similarity, top 3 items | ~90 MB RAM and ~1 ms per question for 94% vs 79% paraphrase recall; no vector database; only relevant items reach the prompt |
 | Wake phrase via Whisper, first 3 s only | No extra model in RAM; room conversation costs one short `tiny.en` pass per utterance instead of a full transcription |
 
 ## Extension points
@@ -202,13 +263,14 @@ class GpioMuteSwitch:
         ...  # read the switch's GPIO pin
 ```
 
-### Online provider (e.g. news)
+### Online provider (e.g. currency rates)
 
-In `online_gateway.py`: add the host to `ALLOWED_HOSTS`, handle the new
-`request.kind` in `lookup`, fetch with `self._fetch(url, params)` (which enforces the
-allowlist and is replaced by a fake in tests), and return
-`LookupResult(source=..., text=...)`. Keep all networking code inside this file, and
-send only the fields of `LookupRequest`.
+In `online_gateway.py`: add the host to `ALLOWED_HOSTS` and the kind to `KINDS`, validate
+its fields in `_validate`, implement `_<kind>(request)` using `self._get(...)` (which
+enforces the allowlist, caches, reuses stale data when offline, and is replaced by a fake
+in tests), and return `LookupResult(source, text, data)`. Add an `ONLINE_<KIND>` switch in
+`config.py`. Keep all networking code in this file, send only `LookupRequest` fields, and
+do any computation on the result locally.
 
 ### Different wake phrase
 
@@ -230,9 +292,12 @@ models, only configuration changes are needed (see [configuration.md](configurat
 | Limitation | Planned fix |
 |---|---|
 | Mute switch and LED are software/console only | GPIO drivers (interfaces are ready) |
-| Only weather is available online; news and search are refused | News provider (RSS) behind the same gateway |
+| Share prices use Yahoo Finance's unofficial, undocumented endpoint, which may change or rate-limit | Provider is swappable in `online_gateway.py`; cached results and an honest "couldn't get live prices" fallback to saved records |
+| News is read out as verbatim headlines, not summarised (the 0.6B model could distort them) | A larger model could summarise |
 | The 0.6B model's one-line weather advice can misjudge probabilities (e.g. "likely to rain" at 14%) | The facts are always read out verbatim first; a larger model or rule-based advice |
-| Fallback check flags any answer containing "can't" | Fall back on signals (empty retrieval, out-of-scope intent) instead of keywords |
+| The 0.6B model sometimes refuses with the right record in context ("what are the medications I am taking daily?" → "not recorded"); Qwen3-1.7B answers it | Larger model on the Pi, if its speed is acceptable (see docs/benchmarks.md) |
+| Memory can't reject near-misses ("wife's birthday" vs mom's) | They are answered with a hedge and the note quoted verbatim |
+| Some paraphrases fall just below the similarity threshold ("power tool" → drill scores 0.31 with the int8 model) | Lower `MEMORY_MIN_SIMILARITY`, at the cost of more hedged near-misses; or a larger embedding model |
 | Router is keyword-based | Grammar-constrained LLM intent output |
 | espeak-ng voice is robotic | Piper TTS (same aplay output path) |
 
