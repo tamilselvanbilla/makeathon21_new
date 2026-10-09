@@ -59,7 +59,9 @@ stateDiagram-v2
 
 1. **Mute check.** `MicInput` asks the `MuteSwitch`. If muted, the indicator shows
    `MUTED` and the microphone is never opened.
-2. **Capture.** `MicrophoneCapture.frames` streams 80 ms frames of 16 kHz audio
+2. **Capture.** Only the last 0.5 s before speech starts is kept, and speech must last
+   `SPEECH_ONSET_FRAMES` (3) frames to count, so earlier room noise never reaches Whisper (on the
+   Pi it had made transcription take 8–16 s). `MicrophoneCapture.frames` streams 80 ms frames of 16 kHz audio
    (resampled if the mic can't do 16 kHz). `record_command` keeps audio once loudness
    passes `SPEECH_RMS_THRESHOLD` and stops after `SILENCE_SECONDS` of quiet. If the
    mute switch flips, the stream stops and the audio is discarded.
@@ -207,7 +209,7 @@ or to an honest "not found".
 | `LLM_MAX_TOKENS=128` | Caps worst-case reply generation time |
 | Whisper `tiny.en`, greedy decoding on Pi | Several times faster than `base` with beam 5; English-only models are more accurate for English |
 | 16 kHz native capture | Avoids resampling (and importing scipy) when the mic supports it |
-| Models loaded once at startup | Loading takes seconds; per-request loading would dominate latency |
+| Models loaded once at startup; the system prompt is processed during start-up (`LocalLLM.warm_up`) | Loading takes seconds; llama.cpp then reuses the processed prompt, so the first answer on a Pi 4 takes ~8 s instead of ~23 s |
 | Stages run sequentially | STT and LLM each get all four cores instead of competing |
 | Lazy imports | Text mode and tests run without audio libraries; startup loads only what is used |
 | Memory: FTS5 + int8 MiniLM embeddings, NumPy similarity, top 3 items | ~90 MB RAM and ~1 ms per question for 94% vs 79% paraphrase recall; no vector database; only relevant items reach the prompt |

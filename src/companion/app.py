@@ -50,6 +50,7 @@ def main(argv: list[str] | None = None) -> None:
     print(f"Loading local model '{config.llm.name}' ({config.llm.threads} threads)...")
     llm = LocalLLM(config.llm)
 
+    microphone_name = None
     if args.text:
         source = TextInput()
     else:
@@ -58,13 +59,19 @@ def main(argv: list[str] | None = None) -> None:
         from .audio.stt import Transcriber
 
         capture = MicrophoneCapture(config.capture, choose_input_device(config.capture.device))
+        microphone_name = capture.device_name
         print(f"Microphone: {capture.device_name} at {capture.sample_rate} Hz")
         print(f"Loading Whisper '{config.stt.model_size}' (beam {config.stt.beam_size})...")
         hotwords = " ".join(filter(None, [config.stt.hotwords, config.default_place]))
         transcriber = Transcriber(config.stt, hotwords=hotwords)
         source = MicInput(capture, transcriber, SoftwareMuteSwitch(), indicator)
 
-    speaker = PrintSpeaker() if args.text or args.no_tts or not config.tts_enabled else make_speaker()
+    if args.text or args.no_tts or not config.tts_enabled:
+        speaker = PrintSpeaker()
+    else:
+        speaker = make_speaker(microphone_name=microphone_name)
+        if getattr(speaker, "devices", None):
+            print(f"Speaker: {speaker.device} (fallbacks: {', '.join(speaker.devices[1:]) or 'none'})")
     records = load_knowledge(config.knowledge.path)
     knowledge = KnowledgeBase(
         records,
@@ -72,7 +79,11 @@ def main(argv: list[str] | None = None) -> None:
         top_k=config.knowledge.top_k,
         currency=config.knowledge.currency,
     )
-    gateway = OnlineGateway(enabled=config.online_lookups_enabled and not args.offline, kinds=config.online_kinds)
+    gateway = OnlineGateway(
+        enabled=config.online_lookups_enabled and not args.offline,
+        kinds=config.online_kinds,
+        home_country=config.home_country,
+    )
     print(f"Online lookups: {', '.join(sorted(gateway.kinds)) or 'off'}")
     assistant = Assistant(
         llm=llm,
@@ -93,6 +104,9 @@ def main(argv: list[str] | None = None) -> None:
             min_similarity=config.memory.min_similarity,
         ),
     )
+
+    print("Warming up the language model...")
+    llm.warm_up(assistant.system_prompt)
 
     startup_ms = (time.perf_counter() - started_at) * 1000
     log_event("startup", duration_ms=startup_ms, raspberry_pi=IS_RASPBERRY_PI)

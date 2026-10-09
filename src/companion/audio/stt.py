@@ -17,6 +17,14 @@ def reliable(segment) -> bool:
     return segment.compression_ratio <= 2.4
 
 
+def echoes_prompt(text: str, hotwords: str | None) -> bool:
+    """On unclear audio Whisper repeats its hint words: on the Pi, room noise came
+    back as "EMI PAN Aadhaar". Two hint words in a row mean an echo, not speech."""
+    words = (hotwords or "").casefold().split()
+    lowered = " ".join(re.findall(r"[a-z0-9']+", text.casefold()))
+    return any(f" {a} {b} " in f" {lowered} " for a, b in zip(words, words[1:]))
+
+
 def looks_like_noise(text: str) -> bool:
     """Transcripts like "M.D. M.D. M.D. S.B. S.B. S.B." that Whisper invents from
     background noise: long but made of very few distinct words."""
@@ -63,7 +71,7 @@ class Transcriber:
                 hotwords=self.hotwords,
             )
             text = " ".join(segment.text.strip() for segment in segments if reliable(segment)).strip()
-        if looks_like_noise(text):
+        if looks_like_noise(text) or echoes_prompt(text, self.hotwords):
             print("[STT] unclear audio ignored")
             return ""
         return text

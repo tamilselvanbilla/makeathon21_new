@@ -89,7 +89,7 @@ the tests. For each step explained, manual installation, and troubleshooting, se
 | `scripts/run.sh --list-mics` | List audio devices and their indexes |
 | `scripts/run.sh --mic-test` | Record 5 seconds to `audio/test.wav` |
 | `scripts/run.sh --list-speakers` | List audio outputs (Pi 4 aux jack: `plughw:CARD=Headphones`) |
-| `scripts/run.sh --speaker-test` | Speak a test phrase through `AUDIO_OUTPUT_DEVICE` |
+| `scripts/run.sh --speaker-test` | Speak a test phrase through the selected speaker |
 
 On start-up the assistant introduces itself: *"Hello John, I'm Sam, your private assistant.
 Ask me anything."*

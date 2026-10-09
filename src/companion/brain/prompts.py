@@ -1,5 +1,10 @@
 """Prompt text for the local model. Kept short: every token costs ~0.1 s on a Pi 4."""
 
+# The figure in the system prompt's example answer. If a reply contains it but the
+# context doesn't, the model copied the example (seen on the Pi for the noise
+# transcript "A": "Your monthly salary is INR 50,000").
+EXAMPLE_FIGURE = "50,000"
+DIDNT_CATCH_ANSWER = "Sorry, I didn't catch that. Could you say it again?"
 NOT_IN_RECORDS_ANSWER = "I couldn't find that in your personal records, so I won't guess."
 NO_RECORDS = "None needed or none found."
 
@@ -28,7 +33,7 @@ def build_system_prompt(
         "financial decisions, state uncertainty and recommend qualified professional guidance. "
         "Reply in at most three short spoken sentences of natural language. Never reproduce raw "
         f"JSON, field labels, or repeated sentences. Money amounts are in {currency}. "
-        f"Example: Question: what is my salary? Answer: Your monthly salary is {currency} 50,000."
+        f"Example: Question: what is my salary? Answer: Your monthly salary is {currency} {EXAMPLE_FIGURE}."
     )
 
 

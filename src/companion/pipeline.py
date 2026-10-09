@@ -1,5 +1,6 @@
 """One conversational turn: hear -> route -> (online lookup) -> reason locally -> speak."""
 
+import re
 import time
 from dataclasses import replace
 from typing import Protocol
@@ -19,7 +20,14 @@ from .brain.memory import (
 )
 from .brain.policy import is_uncertain, require_local_answer
 from .brain.news import headlines_reply, is_news_question, news_request
-from .brain.prompts import NOT_IN_RECORDS_ANSWER, build_advice_prompt, build_system_prompt, build_user_prompt
+from .brain.prompts import (
+    DIDNT_CATCH_ANSWER,
+    EXAMPLE_FIGURE,
+    NOT_IN_RECORDS_ANSWER,
+    build_advice_prompt,
+    build_system_prompt,
+    build_user_prompt,
+)
 from .brain.router import Intent, extract_place, parse_lookup, route
 from .device.indicator import Indicator, IndicatorState
 from .device.mute import MuteSwitch
@@ -88,6 +96,9 @@ class MicInput:
 
         self.indicator.show(IndicatorState.THINKING)
         text = self.transcriber.transcribe(audio)
+        if text and len(re.findall(r"[A-Za-z]{2,}", text)) < 2:
+            print(f"[LISTENING] ignored {text!r}: too short to be a request")
+            return ""
         if text:
             print(f"You: {text}")
         return text
@@ -161,6 +172,8 @@ class Assistant:
         answer = require_local_answer(
             self.llm.chat(self.system_prompt, build_user_prompt(text, knowledge, remembered, earlier))
         )
+        if EXAMPLE_FIGURE in answer and EXAMPLE_FIGURE not in f"{knowledge} {remembered} {earlier}":
+            return DIDNT_CATCH_ANSWER, False  # copied the prompt's example, not real data
         return answer, not is_uncertain(answer)
 
     def _is_market_question(self, text: str) -> bool:

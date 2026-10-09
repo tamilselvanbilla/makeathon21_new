@@ -27,7 +27,7 @@ from companion.brain.memory import (  # noqa: E402
 from companion.brain.prompts import NO_RECORDS, NOT_IN_RECORDS_ANSWER, build_system_prompt, build_welcome  # noqa: E402
 from companion.brain.llm import clean_model_response  # noqa: E402
 from companion.audio.capture import pick_microphone, record_command  # noqa: E402
-from companion.audio.stt import looks_like_noise, reliable  # noqa: E402
+from companion.audio.stt import echoes_prompt, looks_like_noise, reliable  # noqa: E402
 from companion.brain.router import Intent, extract_place, parse_lookup, route  # noqa: E402
 from companion.config import CaptureConfig  # noqa: E402
 from companion.device.indicator import ConsoleIndicator, IndicatorState  # noqa: E402
@@ -38,6 +38,7 @@ from companion.brain.news import news_request  # noqa: E402
 from companion.online_gateway import (  # noqa: E402
     FORECAST_URL,
     GEOCODING_URL,
+    best_place,
     LookupRequest,
     LookupUnavailable,
     OnlineGateway,
@@ -292,6 +293,15 @@ class PrivacyTests(unittest.TestCase):
                 lookup(request)
         self.assertEqual(fetch.sent, [])
 
+    def test_best_place_prefers_home_country_then_population(self):
+        results = [
+            {"name": "Bangalore Town", "country_code": "PK"},
+            {"name": "Mysore Road Tolgate", "country_code": "IN"},
+            {"name": "Mysuru", "country_code": "IN", "population": 920550},
+        ]
+        self.assertEqual(best_place(results, "IN")["name"], "Mysuru")
+        self.assertEqual(best_place(results[:1], "IN")["name"], "Bangalore Town")  # nothing better available
+
     def test_only_allowlisted_hosts(self):
         with self.assertRaises(LookupUnavailable):
             check_host_allowed("https://example.com/v1/search")
@@ -349,7 +359,8 @@ class ReasoningTests(unittest.TestCase):
             LookupRequest("weather", "New York", "tomorrow"),
         )
         self.assertEqual(parse_lookup("will it rain today", "Bengaluru"), LookupRequest("weather", "Bengaluru"))
-        self.assertEqual(extract_place("weather in Mysore and should I go for a run?"), "Mysore")
+        self.assertEqual(extract_place("weather in Mysore and should I go for a run?"), "Mysuru")  # old name mapped
+        self.assertEqual(extract_place("What is a weather in Bangalore today?"), "Bengaluru")
         self.assertIsNone(extract_place("should I go for a run"))
 
     def test_rain_matches_whole_words_only(self):
@@ -468,6 +479,11 @@ class SpeechFilterTests(unittest.TestCase):
         self.assertFalse(looks_like_noise("Can you give me what are the medications I am taking daily?"))
         self.assertFalse(looks_like_noise("no no no no"))  # short answers are kept
 
+    def test_hint_word_echo_is_dropped(self):
+        self.assertTrue(echoes_prompt("EMI PAN Aadhaar", "EMI PAN Aadhaar Bengaluru"))
+        self.assertFalse(echoes_prompt("What is my EMI?", "EMI PAN Aadhaar Bengaluru"))
+        self.assertFalse(echoes_prompt("What is my PAN card number?", "EMI PAN Aadhaar Bengaluru"))
+
     def test_whisper_quality_signals(self):
         segment = lambda **kw: SimpleNamespace(**{"no_speech_prob": 0.1, "avg_logprob": -0.3, "compression_ratio": 1.2, **kw})  # noqa: E731
         self.assertTrue(reliable(segment()))
@@ -547,6 +563,11 @@ class PipelineTests(unittest.TestCase):
         _, out = quietly(assistant.respond, "what is my monthly income")
         self.assertIn("[CONTEXT] records sent to the model:", out)
         self.assertIn("Monthly Income: 85000", out)
+
+    def test_copied_prompt_example_is_not_presented_as_data(self):
+        assistant, _, _ = make_assistant(llm=FakeLLM("A. Your monthly salary is INR 50,000."))
+        reply, _ = quietly(assistant.respond, "A")
+        self.assertEqual(reply, "Sorry, I didn't catch that. Could you say it again?")
 
     def test_uncertain_model_answer_is_spoken_but_not_remembered(self):
         memory = ConversationMemory(clock=Clock())
@@ -875,9 +896,22 @@ class NewsTests(unittest.TestCase):
 
 class CommandRecordingTests(unittest.TestCase):
     def test_command_ends_after_silence(self):
-        audio = record_command(iter(frames(0, 1000, 1000, *[0] * 10, 1000)), CAPTURE, max_wait_seconds=6)
-        self.assertEqual(len(audio), 1280 * 13)  # stops after 10 silent frames (0.8 s)
+        audio = record_command(iter(frames(0, 1000, 1000, 1000, *[0] * 10, 1000)), CAPTURE, max_wait_seconds=6)
+        self.assertEqual(len(audio), 1280 * 14)  # pre-roll + 3 loud + 10 silent frames (0.8 s)
         self.assertEqual(audio.dtype, np.float32)
+
+    def test_brief_noise_spikes_do_not_start_a_recording(self):
+        spikes = frames(1000, 0, 0, 1000, 1000, 0, *[0] * 20)  # 1- and 2-frame bursts
+        self.assertEqual(record_command(iter(spikes), CAPTURE, max_wait_seconds=1.5).size, 0)
+
+    def test_only_half_a_second_before_speech_is_kept(self):
+        audio = record_command(iter(frames(*[100] * 60, 1000, 1000, 1000, *[0] * 10)), CAPTURE, max_wait_seconds=30)
+        # 4.8 s of room noise before speech: only the 6 frames of pre-roll + 3 onset frames survive
+        self.assertEqual(len(audio), 1280 * (9 + 10))
+
+    def test_max_record_counts_from_speech_start(self):
+        audio = record_command(iter(frames(*[0] * 100, *[1000] * 400)), CAPTURE, max_wait_seconds=30)
+        self.assertLessEqual(len(audio) / 16000, 15 + 0.8)  # 15 s of speech plus pre-roll
 
     def test_command_times_out_without_speech(self):
         audio = record_command(iter(frames(*[0] * 100)), CAPTURE, max_wait_seconds=0.4)
@@ -888,6 +922,11 @@ class CommandRecordingTests(unittest.TestCase):
 
 
 class MuteAndIndicatorTests(unittest.TestCase):
+    def test_one_word_noise_transcripts_are_ignored(self):
+        indicator = RecordingIndicator()
+        source = MicInput(FakeCapture(), FakeTranscriber("A"), SoftwareMuteSwitch(), indicator)
+        self.assertEqual(quietly(source.next_utterance)[0], "")
+
     def test_every_utterance_is_a_request(self):
         indicator = RecordingIndicator()
         source = MicInput(FakeCapture(), FakeTranscriber(), SoftwareMuteSwitch(), indicator)
@@ -936,14 +975,40 @@ class SpeechOutputTests(unittest.TestCase):
         self.assertEqual(play_input, b"RIFF-wav")
 
     def test_playback_failure_is_reported_not_raised(self):
-        def failing_run(command, **kwargs):
-            raise subprocess.CalledProcessError(1, command, stderr=b"audio open error: Unknown error 524")
+        def run(command, **kwargs):
+            if command[0] == "aplay":
+                raise subprocess.CalledProcessError(1, command, stderr=b"audio open error: Unknown error 524")
+            return subprocess.CompletedProcess(command, 0, stdout=b"RIFF-wav", stderr=b"")
 
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            EspeakSpeaker(run=failing_run).say("hello")
+            EspeakSpeaker(["default"], run=run).say("hello")
         self.assertIn("Unknown error 524", out.getvalue())
         self.assertIn("AUDIO_OUTPUT_DEVICE", out.getvalue())
+
+    def test_falls_back_to_a_working_device_and_keeps_it(self):
+        played = []
+
+        def run(command, **kwargs):
+            if command[0] == "aplay":
+                played.append(command[-1])
+                if command[-1] == "default":
+                    raise subprocess.CalledProcessError(1, command, stderr=b"Unknown error 524")
+            return subprocess.CompletedProcess(command, 0, stdout=b"RIFF-wav", stderr=b"")
+
+        speaker = EspeakSpeaker(["default", "plughw:3,0"], run=run)
+        with contextlib.redirect_stdout(io.StringIO()):
+            speaker.say("one")
+            speaker.say("two")
+        self.assertEqual(played, ["default", "plughw:3,0", "plughw:3,0"])  # second reply goes straight there
+        self.assertEqual(speaker.device, "plughw:3,0")
+
+    def test_output_prefers_the_microphones_own_device(self):
+        from companion.device.tts import output_candidates
+        self.assertEqual(
+            output_candidates("Plantronics Blackwire 3220 Seri: USB Audio (hw:3,0)"),
+            ["plughw:3,0", "plughw:CARD=Headphones,DEV=0", "default"],
+        )
 
 
 if __name__ == "__main__":

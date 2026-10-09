@@ -23,13 +23,13 @@ Defaults marked **Pi / other** differ by platform. A Raspberry Pi is detected fr
 | `LLM_THREADS` | cores | CPU threads for generation |
 | `LLM_BATCH` | `256` | Prompt-processing batch size |
 | `LLM_MAX_TOKENS` | `128` | Maximum reply length. The main lever on reply time on a Pi |
-| `LLM_TEMPERATURE` | `0.2` | Lower means more factual and repeatable |
+| `LLM_TEMPERATURE` | `0` | 0 = greedy: the same question always gets the same answer. At 0.2 the Pi answered "monthly income" with the gross figure once and the net figure once |
 
 ## Speech recognition (faster-whisper)
 
 | Variable | Default (Pi / other) | Description |
 |---|---|---|
-| `WHISPER_MODEL_SIZE` | `tiny.en` / `base.en` | `tiny.en`, `base.en`, `small.en`, ... Larger is more accurate and slower. Cache a new size with setup first (see [setup.md §8](setup.md#8-updating-and-changing-models)) |
+| `WHISPER_MODEL_SIZE` | `base.en` | `tiny.en`, `base.en`, `small.en`, ... On the Pi 4, `base.en` takes ~4.2 s per short question vs ~2.2 s for `tiny.en`, but `tiny.en` misheard live questions ("what is my EMI" → "what is mine"). Cache a new size with setup first (see [setup.md §8](setup.md#8-updating-and-changing-models)) |
 | `WHISPER_LANGUAGE` | `en` | Language code. Use a multilingual size (no `.en`) for other languages |
 | `WHISPER_BEAM_SIZE` | `1` / `5` | `1` is greedy decoding (fastest); `5` is more accurate |
 | `WHISPER_HOTWORDS` | `EMI PAN Aadhaar` | Words Whisper should favour; `DEFAULT_PLACE` is added automatically |
@@ -40,6 +40,7 @@ Defaults marked **Pi / other** differ by platform. A Raspberry Pi is detected fr
 | Variable | Default | Description |
 |---|---|---|
 | `MIC_DEVICE` | *(automatic)* | Index or part of the name of the input device (`scripts/run.sh --list-mics`). Unset: the system default input, else the first USB/ReSpeaker/"mic" device that isn't a loopback or monitor |
+| `SPEECH_ONSET_FRAMES` | `3` | Consecutive 80 ms frames above the threshold that count as speech starting, so clicks and bumps don't start a recording. Only 0.5 s before that is kept |
 | `SPEECH_RMS_THRESHOLD` | `450` | Loudness that counts as speech (int16 RMS). Lower for quiet mics, higher for noisy rooms |
 | `SILENCE_SECONDS` | `0.8` | Silence that ends an utterance |
 | `MAX_RECORD_SECONDS` | `15` | Hard cap on one utterance |
@@ -63,7 +64,7 @@ the device's native rate and resampled.
 | `TTS_VOLUME` | `1.0` | 0.0 to 1.0 |
 | `TTS_VOICE` | *(system default)* | Voice name, e.g. `en-us` or `en-gb` for espeak-ng (`espeak-ng --voices=en` lists them); a voice id for pyttsx3 |
 | `TTS_ENGINE` | `auto` | `auto` uses espeak-ng + aplay when both are installed (Linux/Pi), otherwise pyttsx3 (macOS/Windows). Force with `espeak` or `pyttsx3` |
-| `AUDIO_OUTPUT_DEVICE` | `default` | ALSA device for `aplay`. Pi 4 3.5 mm jack: `plughw:CARD=Headphones`. List with `scripts/run.sh --list-speakers` |
+| `AUDIO_OUTPUT_DEVICE` | *(automatic)* | ALSA device for `aplay`. Unset: the microphone's own USB device (e.g. a headset), then the Pi's 3.5 mm jack (`plughw:CARD=Headphones,DEV=0`), then `default`; a device that fails is skipped and the first that works is kept (start-up prints `Speaker: …`). On a Pi running PipeWire, `default` fails with error 524 outside the desktop session. List with `scripts/run.sh --list-speakers` |
 
 ## Online lookups
 
@@ -75,6 +76,7 @@ the device's native rate and resampled.
 | `ONLINE_NEWS` | `1` | `0` switches off news headlines |
 | `ASSISTANT_NAME` | `Sam` | The assistant's name in the welcome message |
 | `CONTEXT_DEBUG` | `0` | `1` prints, for each question, the records and memory sent to the model, to check what it was given |
+| `HOME_COUNTRY` | `IN` | Preferred country (ISO code) when a place name exists in several countries; chosen locally, never sent. Old city names (Bangalore, Bombay, Madras, Calcutta, Mysore, Trivandrum, Cochin, Pondicherry) are mapped to current ones first |
 | `DEFAULT_PLACE` | `Bengaluru` | Place used for weather questions that don't name one ("will it rain today?") |
 | `MARKET_SYMBOLS_FILE` | `knowledge_base/market_symbols.json` | Company and index names the assistant may look up, mapped to symbols |
 

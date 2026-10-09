@@ -1,6 +1,7 @@
 """Spoken output."""
 
 import os
+import re
 import shutil
 import subprocess
 from typing import Callable, Protocol
@@ -10,7 +11,7 @@ TTS_RATE = int(os.getenv("TTS_RATE", "150"))
 TTS_VOLUME = float(os.getenv("TTS_VOLUME", "1.0"))
 TTS_VOICE = os.getenv("TTS_VOICE", "")
 # ALSA device for aplay, e.g. "plughw:CARD=Headphones" for the Pi 4's 3.5 mm jack.
-AUDIO_OUTPUT_DEVICE = os.getenv("AUDIO_OUTPUT_DEVICE", "default")
+AUDIO_OUTPUT_DEVICE = os.getenv("AUDIO_OUTPUT_DEVICE", "")  # empty: choose automatically
 SPEECH_TIMEOUT_SECONDS = 60
 
 
@@ -25,20 +26,41 @@ class PrintSpeaker:
         print(f"Assistant: {text}")
 
 
+def output_candidates(microphone_name: str | None = None) -> list[str]:
+    """ALSA devices to try for speech, best first.
+
+    AUDIO_OUTPUT_DEVICE if set; otherwise the microphone's own USB device (a
+    headset plays in the ear that is listening), the Pi's 3.5 mm jack, and
+    "default" last: on a Pi running PipeWire, "default" failed with "audio open
+    error: Unknown error 524" when started outside the desktop session.
+    """
+    if AUDIO_OUTPUT_DEVICE:
+        return [AUDIO_OUTPUT_DEVICE]
+    candidates = []
+    match = re.search(r"\(hw:(\d+),\d+\)", microphone_name or "")
+    if match:
+        candidates.append(f"plughw:{match.group(1)},0")
+    candidates += ["plughw:CARD=Headphones,DEV=0", "default"]
+    return list(dict.fromkeys(candidates))
+
+
 class EspeakSpeaker:
     """espeak-ng renders a WAV in memory and aplay plays it through ALSA.
 
     espeak-ng's own playback (also used by pyttsx3) needs a running
     PulseAudio/PipeWire server and fails on Pi OS Lite or over SSH with
-    "audio open error: Unknown error 524". aplay writes to ALSA directly.
+    "audio open error: Unknown error 524". aplay writes to ALSA directly. If a
+    device fails, the next candidate is tried and the first that works is kept.
     """
 
     def __init__(
         self,
-        device: str = AUDIO_OUTPUT_DEVICE,
+        device: str | list[str] | None = None,
         run: Callable[..., subprocess.CompletedProcess] = subprocess.run,
     ):
-        self.device = device
+        devices = [device] if isinstance(device, str) else list(device or output_candidates())
+        self.devices = devices
+        self.device = devices[0]
         self._run = run
 
     def synth_command(self) -> list[str]:
@@ -53,8 +75,8 @@ class EspeakSpeaker:
             command += ["-v", TTS_VOICE]
         return command
 
-    def play_command(self) -> list[str]:
-        return ["aplay", "-q", "-D", self.device]
+    def play_command(self, device: str | None = None) -> list[str]:
+        return ["aplay", "-q", "-D", device or self.device]
 
     def say(self, text: str) -> None:
         print(f"Assistant: {text}")
@@ -67,18 +89,27 @@ class EspeakSpeaker:
                 timeout=SPEECH_TIMEOUT_SECONDS,
                 check=True,
             ).stdout
-            self._run(
-                self.play_command(),
-                input=wav,
-                capture_output=True,
-                timeout=SPEECH_TIMEOUT_SECONDS,
-                check=True,
-            )
-        except subprocess.CalledProcessError as exc:
-            detail = exc.stderr.decode(errors="replace").strip() if exc.stderr else ""
-            print(f"(Speech output failed: {exc.cmd[0]}: {detail or exc}. Check AUDIO_OUTPUT_DEVICE.)")
-        except (OSError, subprocess.TimeoutExpired) as exc:
-            print(f"(Speech output failed: {exc})")
+        except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired) as exc:
+            print(f"(Speech output failed: espeak-ng: {exc})")
+            return
+
+        errors = []
+        for device in [self.device] + [d for d in self.devices if d != self.device]:
+            try:
+                self._run(self.play_command(device), input=wav, capture_output=True,
+                          timeout=SPEECH_TIMEOUT_SECONDS, check=True)
+            except subprocess.CalledProcessError as exc:
+                detail = exc.stderr.decode(errors="replace").strip() if exc.stderr else str(exc)
+                errors.append(f"{device}: {detail}")
+                continue
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                errors.append(f"{device}: {exc}")
+                continue
+            if device != self.device:
+                print(f"(Speech output: {self.device} failed, using {device} from now on.)")
+                self.device = device
+            return
+        print(f"(Speech output failed on every device: {'; '.join(errors)}. Check AUDIO_OUTPUT_DEVICE.)")
 
 
 class Pyttsx3Speaker:
@@ -103,12 +134,12 @@ class Pyttsx3Speaker:
         engine.stop()
 
 
-def make_speaker(engine: str = TTS_ENGINE) -> Speaker:
+def make_speaker(engine: str = TTS_ENGINE, microphone_name: str | None = None) -> Speaker:
     """Pick espeak-ng + aplay where available (Linux/Pi), else pyttsx3."""
     if engine == "espeak" or (
         engine == "auto" and shutil.which("espeak-ng") and shutil.which("aplay")
     ):
-        return EspeakSpeaker()
+        return EspeakSpeaker(output_candidates(microphone_name))
     return Pyttsx3Speaker()
 
 
@@ -117,5 +148,5 @@ if __name__ == "__main__":
     import sys
 
     speaker = make_speaker()
-    print(f"Engine: {type(speaker).__name__}, device: {AUDIO_OUTPUT_DEVICE}")
+    print(f"Engine: {type(speaker).__name__}, devices: {getattr(speaker, 'devices', 'system voice')}")
     speaker.say(" ".join(sys.argv[1:]) or "Speaker test. One, two, three.")

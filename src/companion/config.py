@@ -67,7 +67,9 @@ class LLMConfig:
             batch=_env_int("LLM_BATCH", 256),
             # ~8-10 tokens/s on a Pi 4, so 128 tokens caps replies at ~15 s.
             max_tokens=_env_int("LLM_MAX_TOKENS", 128),
-            temperature=_env_float("LLM_TEMPERATURE", 0.2),
+            # 0 = greedy: the same question always gets the same answer (at 0.2 the Pi
+            # answered "monthly income" with the gross figure once and the net figure once).
+            temperature=_env_float("LLM_TEMPERATURE", 0.0),
         )
 
 
@@ -83,7 +85,9 @@ class STTConfig:
     def from_env(cls) -> "STTConfig":
         return cls(
             # English-only models are faster and more accurate for English.
-            model_size=os.getenv("WHISPER_MODEL_SIZE", "tiny.en" if IS_RASPBERRY_PI else "base.en"),
+            # base.en on the Pi too: tiny.en misheard live questions ("what is my EMI" ->
+            # "what is mine"); base.en with beam 1 costs ~4.2 s vs 2.2 s per question.
+            model_size=os.getenv("WHISPER_MODEL_SIZE", "base.en"),
             language=os.getenv("WHISPER_LANGUAGE", "en"),
             # Greedy decoding is ~3x faster than beam 5 on a Pi 4.
             beam_size=_env_int("WHISPER_BEAM_SIZE", 1 if IS_RASPBERRY_PI else 5),
@@ -101,6 +105,7 @@ class CaptureConfig:
     max_wait_for_speech_seconds: float
     silence_seconds: float
     speech_rms_threshold: float
+    speech_onset_frames: int = 3
 
     @classmethod
     def from_env(cls) -> "CaptureConfig":
@@ -112,6 +117,9 @@ class CaptureConfig:
             max_wait_for_speech_seconds=_env_float("MAX_WAIT_FOR_SPEECH_SECONDS", 30),
             silence_seconds=_env_float("SILENCE_SECONDS", 0.8),
             speech_rms_threshold=_env_float("SPEECH_RMS_THRESHOLD", 450),
+            # Consecutive 80 ms frames above the threshold that count as speech starting;
+            # on the Pi, half of the room's noise bursts were 1-2 frames long.
+            speech_onset_frames=_env_int("SPEECH_ONSET_FRAMES", 3),
         )
 
 
@@ -177,6 +185,7 @@ class AppConfig:
     online_kinds: tuple[str, ...]
     market_symbols_file: Path
     default_place: str
+    home_country: str
     assistant_name: str
     debug_context: bool
     tts_enabled: bool
@@ -201,6 +210,8 @@ class AppConfig:
             ),
             # Place used for weather questions that don't name one.
             default_place=os.getenv("DEFAULT_PLACE", "Bengaluru"),
+            # Preferred country (ISO code) when a place name exists in several countries.
+            home_country=os.getenv("HOME_COUNTRY", "IN"),
             # Used in the welcome message.
             assistant_name=os.getenv("ASSISTANT_NAME", "Sam"),
             # Print the records and memory sent to the model with each question.
