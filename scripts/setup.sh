@@ -69,6 +69,29 @@ done
 
 step() { printf '\n==> %s\n' "$1"; }
 
+sha256_of() {
+  if command -v sha256sum >/dev/null; then
+    sha256sum "$1" | cut -d' ' -f1
+  else
+    shasum -a 256 "$1" | cut -d' ' -f1
+  fi
+}
+
+# Download URL to DEST once (resuming partial downloads) and verify its SHA-256.
+download_verified() {
+  local url="$1" dest="$2" expected="$3"
+  mkdir -p "$(dirname "$dest")"
+  if [ ! -f "$dest" ]; then
+    curl -fL --retry 3 -C - -o "$dest.part" "$url"
+    mv "$dest.part" "$dest"
+  fi
+  if [ "$(sha256_of "$dest")" != "$expected" ]; then
+    echo "Checksum mismatch for $(basename "$dest"); delete it and re-run setup." >&2
+    exit 1
+  fi
+  echo "$(basename "$dest"): checksum OK."
+}
+
 IS_PI=0
 if grep -qi "raspberry pi" /proc/device-tree/model 2>/dev/null; then
   IS_PI=1
@@ -134,24 +157,7 @@ fi
 # --- Models ------------------------------------------------------------------
 if [ "$SKIP_MODELS" = 0 ]; then
   step "Downloading local LLM ($MODEL_FILE, ~400 MB)"
-  mkdir -p "$MODEL_DIR"
-  if [ ! -f "$MODEL_DIR/$MODEL_FILE" ]; then
-    curl -fL --retry 3 -C - -o "$MODEL_DIR/$MODEL_FILE.part" "$MODEL_URL"
-    mv "$MODEL_DIR/$MODEL_FILE.part" "$MODEL_DIR/$MODEL_FILE"
-  else
-    echo "Already present."
-  fi
-
-  if command -v sha256sum >/dev/null; then
-    ACTUAL="$(sha256sum "$MODEL_DIR/$MODEL_FILE" | cut -d' ' -f1)"
-  else
-    ACTUAL="$(shasum -a 256 "$MODEL_DIR/$MODEL_FILE" | cut -d' ' -f1)"
-  fi
-  if [ "$ACTUAL" != "$MODEL_SHA256" ]; then
-    echo "Checksum mismatch for $MODEL_FILE; delete it and re-run setup." >&2
-    exit 1
-  fi
-  echo "Checksum OK."
+  download_verified "$MODEL_URL" "$MODEL_DIR/$MODEL_FILE" "$MODEL_SHA256"
 
   step "Caching Whisper speech-to-text model"
   # Uses the same Pi-aware default as the app (tiny.en on a Pi, base.en elsewhere).

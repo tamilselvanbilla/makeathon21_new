@@ -69,6 +69,32 @@ the device's native rate and resampled.
 | Variable | Default | Description |
 |---|---|---|
 | `ONLINE_LOOKUPS` | `1` | `0` disables the online gateway entirely (same as `--offline`) |
+| `DEFAULT_PLACE` | `Bengaluru` | Place used for weather questions that don't name one ("will it rain today?") |
+
+Only weather is supported (Open-Meteo, no API key). The question is parsed on the
+device and only the place name and the day ("today"/"tomorrow") are sent.
+
+## Wake phrase and conversation
+
+The wake phrase is spotted in Whisper's own transcripts, so no wake-word model is
+downloaded and there is no extra licence (Whisper and faster-whisper are MIT).
+
+| Variable | Default | Description |
+|---|---|---|
+| `WAKE_WORD` | `1` | `0` treats any speech as a request (same as `--no-wake-word`) |
+| `WAKE_PHRASE` | `hey jarvis` | Any phrase. The greeting is flexible: with `hey jarvis`, "Jarvis", "Hi Jarvis" and "OK Jarvis" also work |
+| `CONVERSATION_TIMEOUT` | `30` | Seconds of silence after a reply before it needs the wake phrase again |
+| `WHISPER_HOTWORDS` | `EMI PAN Aadhaar` | Words Whisper should favour. The wake name and `DEFAULT_PLACE` are added automatically |
+
+**Choosing a wake phrase:** use a name Whisper spells consistently, i.e. real words
+or common names ("hey computer", "hey jarvis", "hello friday"). Invented names get
+spelled differently each time and won't match. Check yours with
+`scripts/run.sh --mic-test`, then
+`cd src && ../.venv/bin/python -m companion.audio.stt ../audio/test.wav`.
+
+**Ending a conversation:** "that's all", "stop listening", "go to sleep", "goodbye",
+"thank you" or "no thanks" put it back to sleep, as do 30 s of silence and the mute
+switch. By voice it never shuts down; `Ctrl+C` stops the program.
 
 ## Set by `scripts/run.sh`
 

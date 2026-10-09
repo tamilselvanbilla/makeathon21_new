@@ -16,11 +16,21 @@ from companion.brain import policy  # noqa: E402
 from companion.brain.knowledge import KnowledgeBase  # noqa: E402
 from companion.brain.prompts import NOT_IN_RECORDS_ANSWER  # noqa: E402
 from companion.brain.llm import clean_model_response  # noqa: E402
-from companion.brain.router import Intent, route  # noqa: E402
+from companion.audio.capture import record_command  # noqa: E402
+from companion.brain.router import Intent, extract_place, parse_lookup, route  # noqa: E402
+from companion.config import CaptureConfig  # noqa: E402
 from companion.device.indicator import ConsoleIndicator, IndicatorState  # noqa: E402
 from companion.device.mute import SoftwareMuteSwitch  # noqa: E402
 from companion.device.tts import EspeakSpeaker  # noqa: E402
-from companion.online_gateway import LookupUnavailable, OnlineGateway  # noqa: E402
+from companion.online_gateway import (  # noqa: E402
+    FORECAST_URL,
+    GEOCODING_URL,
+    LookupRequest,
+    LookupUnavailable,
+    OnlineGateway,
+    check_host_allowed,
+)
+from companion.brain.wake import WakePhrase, is_sleep_command  # noqa: E402
 from companion.pipeline import Assistant, MicInput  # noqa: E402
 
 NETWORK_MODULES = {"requests", "httpx", "urllib3", "aiohttp", "socket", "http.client", "urllib.request"}
@@ -53,17 +63,95 @@ class FakeSpeaker:
 
 
 class FakeCapture:
-    def __init__(self):
-        self.calls = 0
+    """Returns scripted utterances: a number of seconds of audio, or 0 for silence."""
 
-    def record_utterance(self, should_abort):
+    def __init__(self, *seconds):
+        self.seconds = list(seconds) or [0.1]
+        self.calls = 0
+        self.waits = []
+
+    def record_utterance(self, should_abort, max_wait_seconds=None):
         self.calls += 1
-        return np.ones(1600, dtype=np.float32)
+        self.waits.append(max_wait_seconds)
+        duration = self.seconds.pop(0) if len(self.seconds) > 1 else self.seconds[0]
+        return np.ones(int(16000 * duration), dtype=np.float32)
+
+
+GEOCODE = {"results": [{"name": "Bengaluru", "country": "India", "latitude": 12.97, "longitude": 77.59}]}
+FORECAST = {
+    "current": {
+        "temperature_2m": 27.2,
+        "apparent_temperature": 28.4,
+        "relative_humidity_2m": 51,
+        "weather_code": 3,
+        "wind_speed_10m": 9.0,
+    },
+    "daily": {
+        "weather_code": [51, 61],
+        "temperature_2m_max": [30.1, 29.0],
+        "temperature_2m_min": [21.4, 20.0],
+        "precipitation_probability_max": [30, 80],
+    },
+}
+
+
+class FakeFetch:
+    """Stands in for the network: records what would have been sent."""
+
+    def __init__(self, geocode=GEOCODE, fail=False):
+        self.geocode = geocode
+        self.fail = fail
+        self.sent = []
+
+    def __call__(self, url, params):
+        check_host_allowed(url)
+        self.sent.append((url, params))
+        if self.fail:
+            raise LookupUnavailable("I couldn't reach the weather service.")
+        return self.geocode if url == GEOCODING_URL else FORECAST
+
+
+def frames(*levels):
+    """80 ms frames with the given int16 amplitude (0 = silence)."""
+    return [np.full(1280, level, dtype=np.int16) for level in levels]
+
+
+CAPTURE = CaptureConfig(
+    device=None,
+    sample_rate=16000,
+    max_record_seconds=15,
+    max_wait_for_speech_seconds=30,
+    silence_seconds=0.8,
+    speech_rms_threshold=450,
+)
 
 
 class FakeTranscriber:
+    """Returns scripted transcripts in order (or a fixed one) and records audio lengths."""
+
+    def __init__(self, *texts):
+        self.texts = list(texts) or ["what is my income"]
+        self.lengths = []
+
     def transcribe(self, audio):
-        return "what is my income"
+        self.lengths.append(len(audio) / 16000)
+        return self.texts.pop(0) if len(self.texts) > 1 else self.texts[0]
+
+
+def conversation(transcripts, seconds=(1,), muted=False, timeout=30):
+    capture = FakeCapture(*seconds)
+    transcriber = FakeTranscriber(*transcripts)
+    indicator = RecordingIndicator()
+    source = MicInput(
+        capture, transcriber, SoftwareMuteSwitch(muted), indicator, WakePhrase("hey jarvis"), timeout
+    )
+    return source, capture, transcriber, indicator
+
+
+def quietly(fn, *args):
+    with contextlib.redirect_stdout(io.StringIO()) as out:
+        result = fn(*args)
+    return result, out.getvalue()
 
 
 class ScriptedInput:
@@ -104,7 +192,7 @@ def make_assistant(llm=None, gateway=None):
     assistant = Assistant(
         llm=llm or FakeLLM(),
         knowledge=KnowledgeBase(SAMPLE_RECORDS),
-        gateway=gateway or OnlineGateway(enabled=True),
+        gateway=gateway or OnlineGateway(enabled=True, fetch=FakeFetch()),
         indicator=indicator,
         speaker=speaker,
     )
@@ -116,17 +204,50 @@ class PrivacyTests(unittest.TestCase):
         self.assertTrue(policy.is_allowed_cloud_lookup("weather in bengaluru"))
         self.assertFalse(policy.is_allowed_cloud_lookup("explain my financial data"))
 
-    def test_gateway_only_accepts_text(self):
-        with self.assertRaises(TypeError):
-            OnlineGateway().lookup(b"\x00\x01raw-audio")
-        with self.assertRaises(TypeError):
-            OnlineGateway().lookup(np.zeros(16000, dtype=np.float32))
+    def test_gateway_only_accepts_structured_requests(self):
+        gateway = OnlineGateway(fetch=FakeFetch())
+        for payload in (b"\x00\x01raw-audio", np.zeros(16000, dtype=np.float32), "weather in bengaluru"):
+            with self.assertRaises(TypeError):
+                gateway.lookup(payload)
 
-    def test_gateway_refuses_private_or_disabled_requests(self):
+    def test_gateway_refuses_disabled_unsupported_or_sentence_like_requests(self):
+        fetch = FakeFetch()
+        cases = [
+            OnlineGateway(enabled=False, fetch=fetch).lookup,
+            OnlineGateway(fetch=fetch).lookup,
+            OnlineGateway(fetch=fetch).lookup,
+        ]
+        requests = [
+            LookupRequest("weather", "Bengaluru"),
+            LookupRequest("news", "Bengaluru"),
+            LookupRequest("weather", "my salary is 85000"),
+        ]
+        for lookup, request in zip(cases, requests):
+            with self.assertRaises(LookupUnavailable):
+                lookup(request)
+        self.assertEqual(fetch.sent, [])
+
+    def test_only_allowlisted_hosts(self):
         with self.assertRaises(LookupUnavailable):
-            OnlineGateway().lookup("search my medical records")
+            check_host_allowed("https://example.com/v1/search")
+        check_host_allowed(GEOCODING_URL)
+        check_host_allowed(FORECAST_URL)
+
+    def test_weather_sends_only_place_and_coordinates(self):
+        fetch = FakeFetch()
+        result = OnlineGateway(fetch=fetch).lookup(LookupRequest("weather", "Bengaluru"))
+        self.assertEqual(result.source, "Open-Meteo")
+        self.assertIn("In Bengaluru, India it is 27 degrees and overcast", result.text)
+        self.assertIn("30 percent chance of rain", result.text)
+        (geo_url, geo_params), (_, forecast_params) = fetch.sent
+        self.assertEqual(geo_params["name"], "Bengaluru")
+        self.assertEqual((forecast_params["latitude"], forecast_params["longitude"]), (12.97, 77.59))
+
+    def test_weather_tomorrow_and_unknown_place(self):
+        tomorrow = OnlineGateway(fetch=FakeFetch()).lookup(LookupRequest("weather", "Bengaluru", "tomorrow"))
+        self.assertIn("tomorrow: light rain, 20 to 29 degrees, with a 80 percent chance", tomorrow.text)
         with self.assertRaises(LookupUnavailable):
-            OnlineGateway(enabled=False).lookup("weather in bengaluru")
+            OnlineGateway(fetch=FakeFetch(geocode={})).lookup(LookupRequest("weather", "Nowhere"))
 
     def test_only_gateway_imports_network_libraries(self):
         offenders = []
@@ -154,6 +275,19 @@ class ReasoningTests(unittest.TestCase):
         raw = "<think>\nlet me reason\n</think>\n\nAnswer: It is sunny. It is sunny."
         self.assertEqual(clean_model_response(raw), "It is sunny.")
         self.assertEqual(clean_model_response("<think>never finished"), "")
+
+    def test_lookup_parsing_keeps_only_place_and_day(self):
+        self.assertEqual(
+            parse_lookup("What's the weather in New York tomorrow?", "Bengaluru"),
+            LookupRequest("weather", "New York", "tomorrow"),
+        )
+        self.assertEqual(parse_lookup("will it rain today", "Bengaluru"), LookupRequest("weather", "Bengaluru"))
+        self.assertEqual(extract_place("weather in Mysore and should I go for a run?"), "Mysore")
+        self.assertIsNone(extract_place("should I go for a run"))
+
+    def test_rain_matches_whole_words_only(self):
+        self.assertIs(route("will it rain in Chennai"), Intent.ONLINE_LOOKUP)
+        self.assertIs(route("when is my train"), Intent.LOCAL_REASONING)
 
     def test_router(self):
         self.assertIs(route("Exit."), Intent.EXIT)
@@ -229,11 +363,33 @@ class PipelineTests(unittest.TestCase):
 
     def test_unavailable_lookup_is_honest_and_skips_the_model(self):
         llm = FakeLLM()
-        assistant, indicator, _ = make_assistant(llm=llm)
-        reply = assistant.respond("what is the weather in bengaluru")
+        offline = OnlineGateway(fetch=FakeFetch(fail=True))
+        assistant, indicator, _ = make_assistant(llm=llm, gateway=offline)
+        with contextlib.redirect_stdout(io.StringIO()):
+            reply = assistant.respond("what is the weather in bengaluru")
         self.assertIn("won't guess", reply)
         self.assertEqual(llm.calls, [])
         self.assertIn(IndicatorState.ONLINE, indicator.states)
+
+    def test_weather_reply_separates_online_facts_from_local_advice(self):
+        llm = FakeLLM("Carry a light umbrella.")
+        assistant, indicator, _ = make_assistant(llm=llm)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            reply = assistant.respond("Do I need an umbrella in Bengaluru?")
+        self.assertTrue(reply.startswith("From Open-Meteo, online: In Bengaluru"))
+        self.assertTrue(reply.endswith("Carry a light umbrella."))
+        self.assertIn("Online facts (already read out", llm.calls[0])
+        self.assertLess(indicator.states.index(IndicatorState.ONLINE), indicator.states.index(IndicatorState.THINKING))
+        self.assertIn("[ONLINE] sent only place='Bengaluru', day='today' to Open-Meteo", out.getvalue())
+        self.assertIn("[LOCAL]", out.getvalue())
+
+    def test_uncertain_advice_is_dropped_but_facts_kept(self):
+        assistant, _, _ = make_assistant(llm=FakeLLM("I can't say."))
+        with contextlib.redirect_stdout(io.StringIO()):
+            reply = assistant.respond("weather in Bengaluru")
+        self.assertTrue(reply.startswith("From Open-Meteo, online:"))
+        self.assertNotIn("can't", reply)
 
     def test_personal_question_without_records_skips_the_model(self):
         llm = FakeLLM()
@@ -265,6 +421,121 @@ class PipelineTests(unittest.TestCase):
         self.assertIs(indicator.states[-1], IndicatorState.IDLE)
 
 
+class CommandRecordingTests(unittest.TestCase):
+    def test_command_ends_after_silence(self):
+        audio = record_command(iter(frames(0, 1000, 1000, *[0] * 10, 1000)), CAPTURE, max_wait_seconds=6)
+        self.assertEqual(len(audio), 1280 * 13)  # stops after 10 silent frames (0.8 s)
+        self.assertEqual(audio.dtype, np.float32)
+
+    def test_command_times_out_without_speech(self):
+        audio = record_command(iter(frames(*[0] * 100)), CAPTURE, max_wait_seconds=0.4)
+        self.assertEqual(audio.size, 0)
+
+    def test_command_discarded_when_stream_stops(self):
+        self.assertEqual(record_command(iter(frames(1000, 1000)), CAPTURE, max_wait_seconds=6).size, 0)
+
+
+class WakePhraseTests(unittest.TestCase):
+    def setUp(self):
+        self.wake = WakePhrase("hey jarvis")
+
+    def test_request_after_wake_phrase(self):
+        self.assertEqual(self.wake.strip("Hey Jarvis, what's the weather today?"), "What's the weather today?")
+        self.assertEqual(self.wake.strip("Jarvis, what is my EMI"), "What is my EMI")
+        self.assertEqual(self.wake.strip("OK Jarvis."), "")
+
+    def test_other_speech_is_not_a_request(self):
+        for text in ("I was telling Jarvis fans", "Hey, are you coming to dinner?", "Jarvisville is nice", ""):
+            self.assertIsNone(self.wake.strip(text))
+
+    def test_custom_phrase(self):
+        wake = WakePhrase("hey computer")
+        self.assertEqual(wake.name, "computer")
+        self.assertEqual(wake.strip("Computer, lights on"), "Lights on")
+
+    def test_sleep_commands(self):
+        self.assertTrue(is_sleep_command("That's all."))
+        self.assertTrue(is_sleep_command("Stop listening!"))
+        self.assertTrue(is_sleep_command("That's all, thanks."))
+        self.assertTrue(is_sleep_command("OK, thank you."))
+        self.assertTrue(is_sleep_command("No thanks"))
+        self.assertFalse(is_sleep_command("stop the timer"))
+        self.assertFalse(is_sleep_command("thanks, what is my EMI"))
+        self.assertFalse(is_sleep_command(""))
+
+
+class ConversationTests(unittest.TestCase):
+    def test_speech_without_wake_phrase_is_ignored_and_not_printed(self):
+        source, _, _, indicator = conversation(["Are you coming to dinner?"])
+        result, out = quietly(source.next_utterance)
+        self.assertEqual(result, "")
+        self.assertFalse(source.awake)
+        self.assertNotIn("dinner", out)
+        self.assertEqual(indicator.states, [IndicatorState.IDLE, IndicatorState.THINKING])
+
+    def test_wake_phrase_then_follow_ups_without_it(self):
+        source, capture, _, indicator = conversation(
+            ["Hey Jarvis, what is my EMI?", "And my monthly income?"]
+        )
+        self.assertEqual(quietly(source.next_utterance)[0], "What is my EMI?")
+        self.assertTrue(source.awake)
+        self.assertEqual(quietly(source.next_utterance)[0], "And my monthly income?")
+        self.assertEqual(capture.waits, [None, 30])  # asleep: wait forever; awake: conversation timeout
+        self.assertEqual(indicator.states[-2:], [IndicatorState.LISTENING, IndicatorState.THINKING])
+
+    def test_bare_wake_phrase_starts_listening(self):
+        source, _, _, _ = conversation(["Hey Jarvis!", "What is my EMI?"])
+        self.assertEqual(quietly(source.next_utterance)[0], "")
+        self.assertTrue(source.awake)
+        self.assertEqual(quietly(source.next_utterance)[0], "What is my EMI?")
+
+    def test_silence_ends_the_conversation(self):
+        source, _, _, _ = conversation(["Hey Jarvis, what is my EMI?"], seconds=(1, 0))
+        quietly(source.next_utterance)
+        result, out = quietly(source.next_utterance)
+        self.assertEqual(result, "")
+        self.assertFalse(source.awake)
+        self.assertIn("[SLEEP] no follow-up for 30 s", out)
+
+    def test_sleep_command_ends_the_conversation(self):
+        source, _, _, _ = conversation(["Hey Jarvis, what is my EMI?", "That's all, thanks."])
+        quietly(source.next_utterance)
+        source.transcriber.texts = ["That's all, thanks."]
+        self.assertEqual(quietly(source.next_utterance)[0], "")
+        self.assertFalse(source.awake)
+
+    def test_wake_phrase_with_stop_never_exits_the_app(self):
+        source, _, _, _ = conversation(["Hey Jarvis, stop."])
+        self.assertEqual(quietly(source.next_utterance)[0], "")
+        self.assertFalse(source.awake)
+
+    def test_muting_ends_the_conversation(self):
+        source, _, _, indicator = conversation(["Hey Jarvis, what is my EMI?"])
+        quietly(source.next_utterance)
+        source.mute.set_muted(True)
+        quietly(source.next_utterance)
+        self.assertFalse(source.awake)
+        self.assertIs(indicator.states[-1], IndicatorState.MUTED)
+
+    def test_only_the_start_of_long_speech_is_checked_while_asleep(self):
+        source, _, transcriber, _ = conversation(["We should book the tickets soon"], seconds=(10,))
+        quietly(source.next_utterance)
+        self.assertEqual(transcriber.lengths, [3.0])  # 3 s checked, the rest never transcribed
+
+    def test_long_request_is_transcribed_in_full_after_waking(self):
+        source, _, transcriber, _ = conversation(
+            ["Hey Jarvis, when does", "Hey Jarvis, when does my car insurance expire?"], seconds=(6,)
+        )
+        self.assertEqual(quietly(source.next_utterance)[0], "When does my car insurance expire?")
+        self.assertEqual(transcriber.lengths, [3.0, 6.0])
+
+    def test_without_wake_phrase_every_utterance_is_a_request(self):
+        indicator = RecordingIndicator()
+        source = MicInput(FakeCapture(), FakeTranscriber(), SoftwareMuteSwitch(), indicator)
+        self.assertEqual(quietly(source.next_utterance)[0], "what is my income")
+        self.assertEqual(indicator.states, [IndicatorState.LISTENING, IndicatorState.THINKING])
+
+
 class MuteAndIndicatorTests(unittest.TestCase):
     def test_muted_mic_never_records(self):
         capture = FakeCapture()
@@ -273,12 +544,6 @@ class MuteAndIndicatorTests(unittest.TestCase):
         self.assertEqual(source.next_utterance(), "")
         self.assertEqual(capture.calls, 0)
         self.assertEqual(indicator.states, [IndicatorState.MUTED])
-
-    def test_unmuted_mic_shows_listening_then_thinking(self):
-        indicator = RecordingIndicator()
-        source = MicInput(FakeCapture(), FakeTranscriber(), SoftwareMuteSwitch(), indicator)
-        self.assertEqual(source.next_utterance(), "what is my income")
-        self.assertEqual(indicator.states, [IndicatorState.LISTENING, IndicatorState.THINKING])
 
     def test_mute_switch_toggles(self):
         switch = SoftwareMuteSwitch()

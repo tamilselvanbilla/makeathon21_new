@@ -2,13 +2,8 @@
 
 import re
 
-ALLOWED_LOOKUP_TERMS = (
-    "weather",
-    "forecast",
-    "news",
-    "search",
-    "current event",
-)
+WEATHER_TERMS = ("weather", "forecast", "temperature", "rain", "raining", "rainy", "umbrella")
+ALLOWED_LOOKUP_TERMS = (*WEATHER_TERMS, "news", "search", "current event", "current events")
 DISALLOWED_CONTEXT_TERMS = (
     "financial",
     "medical",
@@ -35,7 +30,8 @@ LOCAL_FALLBACK_ANSWER = (
 def is_allowed_cloud_lookup(question: str) -> bool:
     """Only permit explicit factual lookup requests; reasoning stays local."""
     normalized = question.casefold()
-    if not any(term in normalized for term in ALLOWED_LOOKUP_TERMS):
+    # Whole words only, so "train" or "brain" never count as "rain".
+    if not any(re.search(rf"\b{re.escape(term)}\b", normalized) for term in ALLOWED_LOOKUP_TERMS):
         return False
     return not any(term in normalized for term in DISALLOWED_CONTEXT_TERMS)
 

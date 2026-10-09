@@ -1,14 +1,58 @@
-"""Microphone capture. Audio is held in memory only and never written to disk."""
+"""Microphone capture. Audio is held in memory only and never written to disk.
+
+The microphone is read as a stream of 80 ms frames of 16 kHz int16 audio.
+`record_command` works on any iterator of such frames, so it is testable
+without hardware.
+"""
 
 import sys
-import time
-from typing import Callable
+from contextlib import closing
+from typing import Callable, Iterable, Iterator
 
 import numpy as np
 
 from ..config import CaptureConfig
 
-BLOCK_SECONDS = 0.1
+TARGET_RATE = 16_000
+FRAME_SAMPLES = 1280
+FRAME_SECONDS = FRAME_SAMPLES / TARGET_RATE  # 0.08 s
+
+
+def record_command(
+    frames: Iterable[np.ndarray],
+    config: CaptureConfig,
+    max_wait_seconds: float,
+) -> np.ndarray:
+    """Record until speech is followed by silence.
+
+    Returns float32 mono 16 kHz audio, or an empty array when no speech started
+    within `max_wait_seconds` or the frames ran out (muted; audio is discarded).
+    """
+    silence_frames_needed = max(1, round(config.silence_seconds / FRAME_SECONDS))
+    chunks: list[np.ndarray] = []
+    silent_frames = 0
+    speech_detected = False
+    elapsed = 0.0
+
+    for frame in frames:
+        chunks.append(frame)
+        elapsed += FRAME_SECONDS
+        rms = float(np.sqrt(np.mean(frame.astype(np.float32) ** 2)))
+        if rms >= config.speech_rms_threshold:
+            speech_detected = True
+            silent_frames = 0
+        elif speech_detected:
+            silent_frames += 1
+            if silent_frames >= silence_frames_needed:
+                break
+        if speech_detected and elapsed >= config.max_record_seconds:
+            break
+        if not speech_detected and elapsed >= max_wait_seconds:
+            return np.empty(0, dtype=np.float32)
+    else:
+        return np.empty(0, dtype=np.float32)  # stream ended: muted mid-recording
+
+    return np.concatenate(chunks).astype(np.float32) / 32768.0
 
 
 def choose_input_device(configured: int | None) -> int:
@@ -53,6 +97,7 @@ class MicrophoneCapture:
         self.device = device
         self.device_name = sd.query_devices(device, "input")["name"]
         self.sample_rate = self._pick_sample_rate()
+        self.block_size = round(self.sample_rate * FRAME_SECONDS)
 
     def _pick_sample_rate(self) -> int:
         """Prefer capturing at 16 kHz natively to skip resampling on the Pi."""
@@ -60,70 +105,44 @@ class MicrophoneCapture:
             self._sd.check_input_settings(
                 device=self.device,
                 channels=1,
-                samplerate=self.config.sample_rate,
+                samplerate=TARGET_RATE,
                 dtype="int16",
             )
-            return self.config.sample_rate
+            return TARGET_RATE
         except (self._sd.PortAudioError, ValueError):
             return int(self._sd.query_devices(self.device, "input")["default_samplerate"])
 
-    def record_utterance(self, should_abort: Callable[[], bool] = lambda: False) -> np.ndarray:
-        """Record until speech is followed by silence.
-
-        Returns float32 mono audio at the configured sample rate, or an empty
-        array when no speech was heard or `should_abort` became true (e.g. the
-        mute switch was flipped mid-recording, in which case audio is discarded).
-        """
-        cfg = self.config
-        block_size = max(1, int(self.sample_rate * BLOCK_SECONDS))
-        silence_blocks_needed = max(1, int(cfg.silence_seconds / BLOCK_SECONDS))
-        chunks: list[np.ndarray] = []
-        silent_blocks = 0
-        speech_detected = False
-        started_at = time.monotonic()
-
+    def frames(self, should_abort: Callable[[], bool] = lambda: False) -> Iterator[np.ndarray]:
+        """Yield 80 ms int16 frames at 16 kHz until `should_abort` returns true."""
         with self._sd.InputStream(
             device=self.device,
             channels=1,
             samplerate=self.sample_rate,
             dtype="int16",
-            blocksize=block_size,
+            blocksize=self.block_size,
         ) as stream:
-            while True:
-                if should_abort():
-                    chunks.clear()
-                    return np.empty(0, dtype=np.float32)
-
-                chunk, overflowed = stream.read(block_size)
+            while not should_abort():
+                chunk, overflowed = stream.read(self.block_size)
                 if overflowed:
                     print("Warning: microphone input overflowed; audio may be incomplete.")
+                yield self._to_16k(chunk.reshape(-1))
 
-                chunk = chunk.reshape(-1)
-                chunks.append(chunk.copy())
-                rms = float(np.sqrt(np.mean(chunk.astype(np.float32) ** 2)))
-
-                if rms >= cfg.speech_rms_threshold:
-                    speech_detected = True
-                    silent_blocks = 0
-                elif speech_detected:
-                    silent_blocks += 1
-                    if silent_blocks >= silence_blocks_needed:
-                        break
-
-                elapsed = time.monotonic() - started_at
-                if speech_detected and elapsed >= cfg.max_record_seconds:
-                    break
-                if not speech_detected and elapsed >= cfg.max_wait_for_speech_seconds:
-                    return np.empty(0, dtype=np.float32)
-
-        audio = np.concatenate(chunks).astype(np.float32) / 32768.0
-        return self._to_target_rate(audio)
-
-    def _to_target_rate(self, audio: np.ndarray) -> np.ndarray:
-        target = self.config.sample_rate
-        if self.sample_rate == target:
-            return audio
+    def _to_16k(self, chunk: np.ndarray) -> np.ndarray:
+        if self.sample_rate == TARGET_RATE:
+            return chunk.copy()
         from scipy.signal import resample_poly
 
-        divisor = np.gcd(self.sample_rate, target)
-        return resample_poly(audio, target // divisor, self.sample_rate // divisor).astype(np.float32)
+        divisor = np.gcd(self.sample_rate, TARGET_RATE)
+        audio = resample_poly(chunk.astype(np.float32), TARGET_RATE // divisor, self.sample_rate // divisor)
+        return np.clip(audio, -32768, 32767).astype(np.int16)[:FRAME_SAMPLES]
+
+    def record_utterance(
+        self,
+        should_abort: Callable[[], bool] = lambda: False,
+        max_wait_seconds: float | None = None,
+    ) -> np.ndarray:
+        """Record one utterance: wait up to `max_wait_seconds` for speech to start
+        (default MAX_WAIT_FOR_SPEECH_SECONDS), then stop after silence."""
+        wait = self.config.max_wait_for_speech_seconds if max_wait_seconds is None else max_wait_seconds
+        with closing(self.frames(should_abort)) as frames:
+            return record_command(frames, self.config, wait)

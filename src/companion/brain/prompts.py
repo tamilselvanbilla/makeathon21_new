@@ -21,9 +21,16 @@ def build_system_prompt(primary_user: str, currency: str = "INR") -> str:
     )
 
 
-def build_user_prompt(question: str, knowledge: str, online_facts: str | None = None) -> str:
-    """Combine the question with local knowledge and any online lookup result."""
-    parts = [f"Question: {question}", f"Knowledge: {knowledge or NO_RECORDS}"]
-    if online_facts:
-        parts.append(f"Online facts: {online_facts}")
-    return "\n".join(parts)
+def build_user_prompt(question: str, knowledge: str) -> str:
+    """Combine the question with local knowledge."""
+    return f"Question: {question}\nKnowledge: {knowledge or NO_RECORDS}"
+
+
+def build_advice_prompt(question: str, online_facts: str, knowledge: str) -> str:
+    """Ask for one sentence of advice about facts that were already read out."""
+    return (
+        f"Question: {question}\nOnline facts (already read out to the user): {online_facts}\n"
+        f"Knowledge: {knowledge or NO_RECORDS}\n"
+        "Reply with one short sentence of practical advice that answers the question. "
+        "Do not repeat the numbers."
+    )

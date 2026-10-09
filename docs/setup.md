@@ -58,7 +58,7 @@ companion needs about 1.1 GB:
 | Python, NumPy, audio | ~100 MB |
 
 Raspberry Pi OS Lite itself uses about 250 MB, leaving over 2 GB free for the
-planned wake-word and Piper TTS models. Check with `free -h` while the assistant
+planned Piper TTS voice. Check with `free -h` while the assistant
 is running.
 
 ### 1.4 Connect audio hardware
@@ -156,7 +156,7 @@ Expected output:
 ```
 Device: Raspberry Pi
 Loading local model 'Qwen3-0.6B-Q4_K_M' (4 threads)...
-Ready in ...s. Say or type 'exit' to stop.
+Ready in ...s. Type 'exit' to stop.
 [LED] IDLE
 You: what is my monthly income
 [LED] THINKING
@@ -219,8 +219,39 @@ MIC_DEVICE=<index> scripts/run.sh
 | `--text` | Type requests instead of speaking |
 | `--no-tts` | Print replies instead of speaking |
 | `--offline` | Disable all online lookups |
+| `--no-wake-word` | Treat any speech as a request |
 
-Stop with `exit` (spoken or typed) or `Ctrl+C`.
+### Wake phrase and conversation
+
+The console shows `[LED] IDLE` while the device waits for the wake phrase. Speech
+that doesn't start with it is dropped (`[IDLE] speech ignored`), and its text is never
+shown or kept.
+
+1. Say **"Hey Jarvis, what is my EMI?"** in one breath (or "Hey Jarvis", then the
+   question). You'll see `[WAKE] 'hey jarvis' heard` and `[LED] LISTENING`.
+2. Ask follow-ups **without** the wake phrase: "And when does my car insurance expire?"
+3. Say **"That's all, thanks"**, or stay quiet for 30 s: `[SLEEP] ...` and back to `IDLE`.
+
+If it doesn't wake, check what Whisper heard: run with `--no-wake-word` and look at the
+`You:` line. Pick a phrase it spells consistently (configuration.md, *Wake phrase*).
+
+### Online lookup
+
+Ask "what's the weather in Mysore tomorrow?". The console shows exactly what left
+the device and where the reasoning happened:
+
+```
+[LED] ONLINE
+[ONLINE] sent only place='Mysore', day='tomorrow' to Open-Meteo
+[ONLINE] Open-Meteo returned: In Mysore, India tomorrow: ...
+[LED] THINKING
+[LOCAL] reasoning about the result on-device
+```
+
+Unplug the network and ask again: the assistant says it couldn't reach the weather
+service and won't guess, while personal questions keep working.
+
+Stop with `Ctrl+C` (or type `exit` in `--text` mode). Spoken "exit" or "goodbye" only ends the current conversation.
 
 To avoid passing `MIC_DEVICE` each time, add it to your shell profile:
 

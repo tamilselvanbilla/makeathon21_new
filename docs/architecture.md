@@ -20,20 +20,22 @@ hardware or features.
 ```mermaid
 flowchart LR
     subgraph Device["Raspberry Pi: everything local"]
-        Mic[Microphone] -->|16 kHz PCM, RAM only| Capture[capture.py<br/>speech detection]
+        Mic[Microphone] -->|80 ms frames, 16 kHz, RAM only| Capture[capture.py<br/>record utterance]
         Mute[Mute switch] -.gates.-> Capture
         Capture --> STT[stt.py<br/>faster-whisper]
-        STT -->|text| Router[router.py]
+        STT -->|text| Wake[wake.py<br/>wake phrase / sleep]
+        Wake -->|request| Router[router.py]
         Router -->|local_reasoning| KB[knowledge.py<br/>personal records]
         KB --> LLM[llm.py<br/>Qwen3-0.6B via llama.cpp]
-        Router -->|online_factual_lookup| GW[online_gateway.py]
+        Router -->|online_factual_lookup| Parse[parse_lookup<br/>place + day]
+        Parse --> GW[online_gateway.py]
         GW -->|facts as text| LLM
         LLM --> Policy[policy.py<br/>honest fallback]
         Policy --> TTS[tts.py]
         TTS --> Spk[Speaker]
         LED[Indicator / LED]
     end
-    GW <-->|allowlisted hosts,<br/>text query only| Net[(Internet)]
+    GW <-->|Open-Meteo only,<br/>place name + day| Net[(Internet)]
 ```
 
 The indicator is updated at each stage:
@@ -58,10 +60,14 @@ stateDiagram-v2
 
 1. **Mute check.** `MicInput` asks the `MuteSwitch`. If muted, the indicator shows
    `MUTED` and the microphone is never opened.
-2. **Capture.** `MicrophoneCapture.record_utterance` reads 100 ms blocks and starts
-   keeping audio once loudness passes `SPEECH_RMS_THRESHOLD`. It stops after
-   `SILENCE_SECONDS` of quiet or `MAX_RECORD_SECONDS`. If the mute switch flips
-   mid-recording, the audio is discarded.
+2. **Capture.** `MicrophoneCapture.frames` streams 80 ms frames of 16 kHz audio
+   (resampled if the mic can't do 16 kHz). `record_command` keeps audio once loudness
+   passes `SPEECH_RMS_THRESHOLD` and stops after `SILENCE_SECONDS` of quiet. If the
+   mute switch flips, the stream stops and the audio is discarded.
+   **Wake phrase:** while asleep (`IDLE`), only the first 3 s are transcribed; if the
+   text doesn't start with the wake phrase it is dropped. Once awake (`LISTENING`),
+   every utterance is a request until `CONVERSATION_TIMEOUT` seconds pass without
+   speech, a sleep phrase is said, or the device is muted (see *Wake phrase* below).
 3. **Transcribe.** `Transcriber` runs faster-whisper (int8, CPU) on the in-memory
    waveform. Its built-in voice-activity filter trims silence.
 4. **Route.** `router.route` returns `EXIT`, `ONLINE_LOOKUP` (weather, forecast, news,
@@ -129,12 +135,37 @@ which a 0.6B model follows more reliably than rules.
 | Rule | How it is enforced |
 |---|---|
 | Only the gateway may use the network | `test_only_gateway_imports_network_libraries` parses every module and fails if any other file imports `socket`, `urllib.request`, `http.client`, `requests`, `httpx`, `urllib3`, or `aiohttp` |
-| Audio can never be sent | `OnlineGateway.lookup` raises `TypeError` for anything that is not `str` (tested with bytes and NumPy arrays) |
-| Only factual lookups go out | The gateway re-checks `is_allowed_cloud_lookup`, refusing requests that mention financial, medical, document, recording, personal, or private data |
+| Neither audio nor the question can be sent | `OnlineGateway.lookup` accepts only a `LookupRequest(kind, place, day)` built locally by `parse_lookup`, and raises `TypeError` for anything else, including plain strings (tested with text, bytes and NumPy arrays) |
+| Only place names go out | `PLACE_PATTERN` rejects anything that isn't a short place name, e.g. "my salary is 85000" |
+| Only factual lookups go out | `route` sends a question online only if it is about weather/news/search and mentions no financial, medical, document, recording, personal, or private data; only weather is implemented |
 | Only known hosts are contacted | `check_host_allowed` validates each URL against `ALLOWED_HOSTS` |
 | Users can switch it off | `--offline` or `ONLINE_LOOKUPS=0` |
 | Models never phone home | `run.sh` sets `HF_HUB_OFFLINE=1` |
 | Online moments are visible | The indicator shows `ONLINE` only while the gateway is in use |
+
+## Wake phrase
+
+There is no wake-word model: `MicInput` transcribes speech with the same Whisper model
+used for requests, and `brain/wake.py` checks the text.
+
+```mermaid
+stateDiagram-v2
+    [*] --> Asleep
+    Asleep --> Asleep: speech without wake phrase (discarded)
+    Asleep --> Awake: "Hey Jarvis[, request]"
+    Awake --> Awake: request (no wake phrase needed)
+    Awake --> Asleep: CONVERSATION_TIMEOUT of silence
+    Awake --> Asleep: "that's all" / "stop listening" / "thank you"
+    Awake --> Asleep: mute switch
+```
+
+| Rule | Detail |
+|---|---|
+| Match | The transcript must **start** with the wake phrase; greetings are interchangeable ("Jarvis", "Hi Jarvis"). "I told Jarvis…" does not wake it |
+| Cost while asleep | Only the first `WAKE_CHECK_SECONDS` (3 s) of each utterance are transcribed; the full utterance is transcribed only after a match |
+| Accuracy | Whisper is given `hotwords` (wake name, EMI, PAN, Aadhaar, default place), which fixed "EMI" being heard as "UI" with `tiny.en` and caused no false wakes on silence, noise, or unrelated speech in testing |
+| Privacy | Ignored speech is transcribed in memory and discarded; its text is never printed, logged, or stored |
+| Never exits by voice | "Exit", "stop" and "goodbye" end the conversation; the program stops only with `Ctrl+C` |
 
 ## Pi 4 performance decisions
 
@@ -149,6 +180,7 @@ which a 0.6B model follows more reliably than rules.
 | Models loaded once at startup | Loading takes seconds; per-request loading would dominate latency |
 | Stages run sequentially | STT and LLM each get all four cores instead of competing |
 | Lazy imports | Text mode and tests run without audio libraries; startup loads only what is used |
+| Wake phrase via Whisper, first 3 s only | No extra model in RAM; room conversation costs one short `tiny.en` pass per utterance instead of a full transcription |
 
 ## Extension points
 
@@ -170,13 +202,20 @@ class GpioMuteSwitch:
         ...  # read the switch's GPIO pin
 ```
 
-### Online provider
+### Online provider (e.g. news)
 
-Add the host to `ALLOWED_HOSTS` in `online_gateway.py`, call `check_host_allowed(url)`
-before each request, and return a `LookupResult(source=..., text=...)` from `lookup`.
-Keep all networking code inside this file.
+In `online_gateway.py`: add the host to `ALLOWED_HOSTS`, handle the new
+`request.kind` in `lookup`, fetch with `self._fetch(url, params)` (which enforces the
+allowlist and is replaced by a fake in tests), and return
+`LookupResult(source=..., text=...)`. Keep all networking code inside this file, and
+send only the fields of `LookupRequest`.
 
-### New input source (e.g. wake word)
+### Different wake phrase
+
+Set `WAKE_PHRASE`; no download or training is needed. Sleep phrases and polite words
+are in `SLEEP_PHRASES` and `POLITE_WORDS` in `brain/wake.py`.
+
+### New input source
 
 Anything with `next_utterance() -> str | None` can drive `Assistant.run`: return text
 for a request, `""` when nothing was heard, and `None` to stop.
@@ -190,9 +229,9 @@ models, only configuration changes are needed (see [configuration.md](configurat
 
 | Limitation | Planned fix |
 |---|---|
-| No wake word; any speech above the threshold is treated as a request | openWakeWord as an input stage before capture |
 | Mute switch and LED are software/console only | GPIO drivers (interfaces are ready) |
-| Online gateway has no providers, so lookups are refused | Open-Meteo weather first |
+| Only weather is available online; news and search are refused | News provider (RSS) behind the same gateway |
+| The 0.6B model's one-line weather advice can misjudge probabilities (e.g. "likely to rain" at 14%) | The facts are always read out verbatim first; a larger model or rule-based advice |
 | Fallback check flags any answer containing "can't" | Fall back on signals (empty retrieval, out-of-scope intent) instead of keywords |
 | Router is keyword-based | Grammar-constrained LLM intent output |
 | espeak-ng voice is robotic | Piper TTS (same aplay output path) |

@@ -77,6 +77,7 @@ class STTConfig:
     language: str
     beam_size: int
     threads: int
+    hotwords: str
 
     @classmethod
     def from_env(cls) -> "STTConfig":
@@ -87,6 +88,8 @@ class STTConfig:
             # Greedy decoding is ~3x faster than beam 5 on a Pi 4.
             beam_size=_env_int("WHISPER_BEAM_SIZE", 1 if IS_RASPBERRY_PI else 5),
             threads=_env_int("WHISPER_THREADS", CPU_COUNT),
+            # Words tiny.en tends to mishear; the wake name is added at startup.
+            hotwords=os.getenv("WHISPER_HOTWORDS", "EMI PAN Aadhaar"),
         )
 
 
@@ -109,6 +112,23 @@ class CaptureConfig:
             max_wait_for_speech_seconds=_env_float("MAX_WAIT_FOR_SPEECH_SECONDS", 30),
             silence_seconds=_env_float("SILENCE_SECONDS", 0.8),
             speech_rms_threshold=_env_float("SPEECH_RMS_THRESHOLD", 450),
+        )
+
+
+@dataclass(frozen=True)
+class WakeWordConfig:
+    enabled: bool
+    phrase: str
+    conversation_timeout: float
+
+    @classmethod
+    def from_env(cls) -> "WakeWordConfig":
+        return cls(
+            enabled=_env_bool("WAKE_WORD", True),
+            # Detected in Whisper transcripts; any phrase Whisper spells reliably.
+            phrase=os.getenv("WAKE_PHRASE", "hey jarvis"),
+            # After waking, follow-ups need no wake phrase until this much silence.
+            conversation_timeout=_env_float("CONVERSATION_TIMEOUT", 30),
         )
 
 
@@ -136,8 +156,10 @@ class AppConfig:
     llm: LLMConfig
     stt: STTConfig
     capture: CaptureConfig
+    wake_word: WakeWordConfig
     knowledge: KnowledgeConfig
     online_lookups_enabled: bool
+    default_place: str
     tts_enabled: bool
 
     @classmethod
@@ -146,7 +168,10 @@ class AppConfig:
             llm=LLMConfig.from_env(),
             stt=STTConfig.from_env(),
             capture=CaptureConfig.from_env(),
+            wake_word=WakeWordConfig.from_env(),
             knowledge=KnowledgeConfig.from_env(),
             online_lookups_enabled=_env_bool("ONLINE_LOOKUPS", True),
+            # Place used for weather questions that don't name one.
+            default_place=os.getenv("DEFAULT_PLACE", "Bengaluru"),
             tts_enabled=_env_bool("TTS_ENABLED", True),
         )

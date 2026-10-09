@@ -42,10 +42,10 @@ keeps working with the network cable unplugged.
 |---|---|---|
 | All reasoning on-device, no cloud LLM | ✅ Done | Qwen3-0.6B Q4 via llama.cpp: `brain/llm.py` |
 | Raw audio never leaves the device | ✅ Done | Audio held in RAM only; the gateway accepts text only, and a test fails if any other module imports a network library |
-| Online calls limited to factual lookups | ✅ Boundary built | `online_gateway.py` (no providers yet, so lookups are refused honestly) |
+| Online calls limited to factual lookups | ✅ Done | Weather via Open-Meteo: only the place name and day leave the device; the reply reads the online facts with their source, then adds local advice. News/search are refused honestly |
 | Honest fallback instead of guessing | 🟡 Basic | `brain/policy.py`; signal-based fallback is planned |
 | Working demo in one human-potential domain | 🟡 Basic | Personal records recall over `knowledge_base/` |
-| Continuous sensing with **wake word** | ⏳ Next | Currently listens for any speech; openWakeWord is planned |
+| Continuous sensing with **wake word** | ✅ Done | "Hey Jarvis" spotted in Whisper transcripts (no wake-word model, MIT licence); after waking, follow-up questions need no wake phrase until 30 s of silence or "that's all" |
 | **Physical mute switch** | ⏳ Next | Interface and software switch done; GPIO driver planned |
 | **Visible listening light** | ⏳ Next | All states implemented, printed to the console; LED driver planned |
 
@@ -87,6 +87,7 @@ the tests. For each step explained, manual installation, and troubleshooting, se
 | `scripts/run.sh --text` | Type requests; ideal over SSH or without a microphone |
 | `scripts/run.sh --no-tts` | Voice in, printed replies out |
 | `scripts/run.sh --offline` | Disable every online lookup |
+| `scripts/run.sh --no-wake-word` | Treat any speech as a request (no wake phrase) |
 | `scripts/run.sh --list-mics` | List audio devices and their indexes |
 | `scripts/run.sh --mic-test` | Record 5 seconds to `audio/test.wav` |
 | `scripts/run.sh --list-speakers` | List audio outputs (Pi 4 aux jack: `plughw:CARD=Headphones`) |
@@ -95,7 +96,8 @@ the tests. For each step explained, manual installation, and troubleshooting, se
 Try asking:
 
 - "What is my monthly income?" (answered locally from `knowledge_base/personal_data.json`)
-- "What's the weather in Bengaluru?" (routed to the online gateway; currently refused honestly)
+- "Hey Jarvis, what's the weather in Bengaluru?" (only "Bengaluru" and "today" go online; the console shows `[ONLINE]` and `[LOCAL]` steps)
+- then, without the wake phrase: "Do I need an umbrella tomorrow?", and finally "That's all, thanks." to end the conversation
 - "Exit" (stops the session)
 
 The `[LED] ...` lines in the console show the indicator state: `IDLE`, `LISTENING`,
@@ -157,7 +159,7 @@ Points 2 and 3 are enforced by tests in `tests/test_privacy_and_control.py`.
 
 ## Roadmap
 
-1. **Must-haves:** openWakeWord wake word, GPIO mute switch, LED driver, weather lookup via Open-Meteo.
+1. **Must-haves:** GPIO mute switch and LED driver (interfaces ready; waiting on hardware choice).
 2. **Core use case:** remember/recall notes, reminders, grammar-constrained intent routing.
 3. **Polish:** signal-based honest fallback, Piper TTS, local web dashboard showing LOCAL vs ONLINE steps, systemd service.
 

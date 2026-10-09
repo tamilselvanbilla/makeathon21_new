@@ -9,10 +9,13 @@ from ..telemetry import timed_event
 
 
 class Transcriber:
-    def __init__(self, config: STTConfig):
+    def __init__(self, config: STTConfig, hotwords: str | None = None):
+        """`hotwords` biases recognition towards app words (wake name, EMI, PAN),
+        which tiny.en otherwise mishears ("EMI" -> "UI")."""
         from faster_whisper import WhisperModel
 
         self.config = config
+        self.hotwords = hotwords
         self._model = WhisperModel(
             config.model_size,
             device="cpu",
@@ -30,6 +33,7 @@ class Transcriber:
                 beam_size=self.config.beam_size,
                 language=self.config.language,
                 vad_filter=True,
+                hotwords=self.hotwords,
             )
             return " ".join(segment.text.strip() for segment in segments).strip()
 
