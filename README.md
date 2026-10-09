@@ -100,6 +100,7 @@ Try asking:
 - "What's the weather in Bengaluru?" (only "Bengaluru" and "today" go online; the console shows `[ONLINE]` and `[LOCAL]` steps)
 - then a follow-up: "And tomorrow?"
 - "Remember that I parked on level B2" … later, even after a restart: "Where did I park?"
+- "Remind me to call mom at 6 pm" / "I have a meeting with Jay tomorrow at 7am" → "yes"; then "What's my schedule tomorrow?"
 - "What is my monthly income?" then "And my wife's?"; later "What did you tell me about my wife's income?"
 - "Forget that" / "Forget everything"
 - "How are my investments doing today?" (only `INFY.NS`, `^NSEI`, `^BSESN` and fund code `120377` go online; values and gains are computed on the device)
@@ -154,7 +155,8 @@ tests/                            unit tests (run without models or audio hardwa
    additionally sets `HF_HUB_OFFLINE=1`. A traced session made no connections except the
    two Open-Meteo calls for a weather question.
 5. **Memory stays on the device and can be erased.** Notes and past questions and answers
-   are kept as text in `data/memory.sqlite3` (git-ignored), deleted after 30 days, and
+   are kept as text in `data/memory.sqlite3` (git-ignored); past exchanges are deleted after
+   30 days, notes and reminders when the user asks; everything can be
    erased on request ("forget that", "forget everything"). Audio and ignored speech are
    never stored; `MEMORY=0` keeps memory for the current session only.
 6. **Logs hold timings, not content.** `logs/assistant.log` records events and durations,

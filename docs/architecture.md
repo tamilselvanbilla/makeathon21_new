@@ -73,8 +73,9 @@ stateDiagram-v2
 5. **Look up (optional).** `OnlineGateway.lookup` validates the query and calls a
    provider. If it cannot, the assistant says so and stops; it never lets the model
    guess real-time facts.
-6. **Retrieve.** Memory commands ("remember that…", "forget that") are handled first,
-   without the model. A follow-up ("and my wife's?") is combined with the previous
+6. **Retrieve.** Memory commands ("remember that…", "remind me…", "forget that"), the
+   answer to a pending "what should I remember?" / "do you want me to remember…?", and
+   schedule questions ("what's my schedule tomorrow?") are handled first, without the model. A follow-up ("and my wife's?") is combined with the previous
    question. `KnowledgeBase.search` finds personal records and `ConversationMemory.search`
    finds notes and, for recall questions, past exchanges (details below). An answer
    that comes only from a note is given directly from it. If the question is personal
@@ -173,12 +174,19 @@ hedged.
 
 | Memory | Stored when | Used when |
 |---|---|---|
-| Note | "Remember (that) …" | Every question. If a note is the only match, the reply is built from it directly ("On 9 October you told me that you parked on level B2"), so a small model can't misquote it |
+| Note | "Remember (that) …", "Remind me …", or "yes" to "Do you want me to remember …?" | Every question. If a note is the only match, the reply is built from it directly ("On 9 October you told me that you parked on level B2"), so a small model can't misquote it |
 | Exchange | A question got a real answer (honest "not in your records" or failed lookups are **not** stored, so they can't come back as facts) | Recall questions only ("did you…", "what did you tell me…", "earlier", "yesterday"), so old answers don't distract ordinary ones. "Yesterday" filters by date |
 | Previous exchange | Same | A follow-up starting with "and", "what about", "how about" within `FOLLOW_UP_MINUTES`; it is combined with the previous question for routing and search, and shown to the model. For weather, a newly named place replaces the old one ("what about in Mumbai?") |
 
-Entries older than `MEMORY_RETENTION_DAYS` are deleted at startup; "forget that" and
-"forget everything" delete on request. Knowledge search also refuses to answer when a
+**Dates and reminders** (`brain/schedule.py`). A note naming a date or time is stored with
+it resolved ("meeting with Jay tomorrow at 7am" → "meeting with Jay on Saturday 10 October
+at 7:00 AM"), so it stays true on later days, and gets a row in the `schedule` table (due
+time, the note without its date words, announced flag). Schedule questions list that
+table's rows for a day; timed rows are announced once when due, between turns.
+
+Notes are kept until the user deletes them. Exchanges older than `MEMORY_RETENTION_DAYS`
+are deleted at startup; "forget that" and "forget everything" delete on request.
+When a note and a past exchange both match, the note ranks first. Knowledge search also refuses to answer when a
 meaningful word of the question appears in none of the matching records ("where is my
 car key" is not answered from a car record), so such questions fall through to memory
 or to an honest "not found".

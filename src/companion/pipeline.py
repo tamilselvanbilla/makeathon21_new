@@ -3,6 +3,7 @@
 import re
 import time
 from dataclasses import replace
+from datetime import timedelta
 from typing import Protocol
 
 import numpy as np
@@ -14,9 +15,12 @@ from .brain.memory import (
     MemoryCommand,
     describe,
     is_follow_up,
+    is_worth_noting,
     note_answer,
     parse_memory_command,
+    schedule_answer,
     second_person,
+    that_clause,
 )
 from .brain.policy import is_uncertain, require_local_answer
 from .brain.news import headlines_reply, is_news_question, news_request
@@ -36,6 +40,18 @@ from .online_gateway import LookupUnavailable, OnlineGateway
 from .telemetry import log_event
 
 MUTE_POLL_SECONDS = 0.1
+# Content after "remind me": "call mom" becomes "I need to call mom"; "I have ..." stays.
+STATEMENT_OR_TO = re.compile(r"^\W*(?:i|i'm|i've|we|my|our|to)\b", re.I)
+# Reminders missed by more than this (device off) are not read out late.
+LATE_REMINDER_LIMIT = timedelta(hours=12)
+YES = re.compile(r"^\W*(?:yes|yeah|yep|yup|sure|ok(?:ay)?|please(?: do)?|do it|go ahead|of course|correct|right|save it|remember it)\b", re.I)
+NO = re.compile(r"^\W*(?:no|nope|nah|don'?t|do not|never ?mind|not needed|cancel)\b", re.I)
+# The model promising to remember something it cannot save itself.
+FALSE_PROMISE = re.compile(
+    r"\b(?:I(?:'ll| will| shall) (?:remember|keep|note|remind|make a note|save)|keep (?:this|that|it) in mind|"
+    r"(?:I'?ve|I have) (?:noted|saved|made a note|remembered)|(?:has|have) been (?:noted|saved))\b",
+    re.I,
+)
 
 
 class ChatModel(Protocol):
@@ -129,12 +145,28 @@ class Assistant:
         self.gateway = gateway
         self.indicator = indicator
         self.speaker = speaker
+        # What the next utterance completes: ("content", prefix) after a bare "remember
+        # that", or ("confirm", statement) after "do you want me to remember that ...?".
+        self._pending: tuple[str, str] | None = None
 
     def respond(self, text: str) -> str:
         """Answer one request. Reasoning always runs on the local model."""
+        pending, self._pending = self._pending, None
+        if pending:
+            reply = self._complete_pending(pending, text)
+            if reply is not None:
+                return reply
         command = parse_memory_command(text)
         if command:
             return self._memory_command(command)
+        is_schedule, day = self.memory.schedule_question(text)
+        if is_schedule:
+            items = self.memory.scheduled_on(day) if day else self.memory.upcoming()
+            print(f"[MEMORY] {len(items)} scheduled item(s) for {day or 'the coming week'}")
+            return schedule_answer(items, day, self.memory.now().date())
+        if is_worth_noting(text, self.memory.now()):
+            self._pending = ("confirm", text)
+            return f"Do you want me to remember{that_clause(text)}?"
 
         previous = self.memory.last_turn() if is_follow_up(text) else None
         # "And my wife's?" is searched and routed as "<previous question> and my wife's?".
@@ -157,7 +189,7 @@ class Assistant:
         items = self.memory.search(text)
         if items:
             print(f"[MEMORY] using {len(items)} remembered item(s)")
-        if not knowledge and items and items[0].kind == "note":
+        if items and items[0].kind == "note" and (not knowledge or items[0].exact):
             # Answer from the user's own note directly; a small model may misquote it.
             return note_answer(items[0]), True
         remembered = describe(items)
@@ -174,6 +206,11 @@ class Assistant:
         )
         if EXAMPLE_FIGURE in answer and EXAMPLE_FIGURE not in f"{knowledge} {remembered} {earlier}":
             return DIDNT_CATCH_ANSWER, False  # copied the prompt's example, not real data
+        if FALSE_PROMISE.search(answer):
+            # Only the app saves notes; never let the model claim it did.
+            print(f"[MEMORY] model claimed to remember: {answer!r}; asking instead")
+            self._pending = ("confirm", text)
+            return f"I haven't saved that. Do you want me to remember{that_clause(text)}?", False
         return answer, not is_uncertain(answer)
 
     def _is_market_question(self, text: str) -> bool:
@@ -210,11 +247,34 @@ class Assistant:
             print(f"[LOCAL] filtering {len(result.data)} headlines for the topic on-device")
         return headlines_reply(result, query), True
 
+    def _complete_pending(self, pending: tuple[str, str], text: str) -> str | None:
+        """The answer to our own question; None if the user moved on to something else."""
+        kind, value = pending
+        if kind == "confirm":
+            if YES.match(text):
+                return self._save_note(value)
+            if NO.match(text):
+                return "Okay, I won't remember it."
+            return None
+        if text.rstrip().endswith("?") or parse_memory_command(text):
+            return None
+        content = text.strip(" .!?")
+        return self._save_note(f"I need to {content}" if value == "to" and not STATEMENT_OR_TO.match(content) else content)
+
+    def _save_note(self, text: str) -> str:
+        stored, when = self.memory.add_note(text)
+        print(f"[MEMORY] note saved on this device: {stored!r}" + (f", reminder at {when.due}" if when and when.has_time else ""))
+        reply = f"Okay, I'll remember{that_clause(stored)}."
+        if when and when.has_time and when.due > self.memory.now():
+            reply = reply[:-1] + ", and remind you then."
+        return reply
+
     def _memory_command(self, command: MemoryCommand) -> str:
         if command.action == "remember":
-            self.memory.add_note(command.text)
-            print("[MEMORY] note saved on this device")
-            return f"Okay, I'll remember that {second_person(command.text)}."
+            return self._save_note(command.text)
+        if command.action == "remember_pending":
+            self._pending = ("content", command.text)
+            return "Sure. What should I remind you to do?" if command.text == "to" else "Sure. What should I remember?"
         if command.action == "forget_last":
             item = self.memory.forget_last()
             print("[MEMORY] last item deleted" if item else "[MEMORY] nothing to delete")
@@ -254,12 +314,41 @@ class Assistant:
         reply = f"From {result.source}, online: {result.text}"
         return (reply if is_uncertain(advice) else f"{reply} {advice}"), True
 
+    def _say(self, text: str) -> None:
+        self.indicator.show(IndicatorState.SPEAKING)
+        self.speaker.say(text)
+        self.indicator.show(IndicatorState.IDLE)
+
+    def due_announcement(self) -> str:
+        """ "Reminder: you have a meeting with Jay at 7:00 AM." for reminders now due."""
+        now = self.memory.now()
+        items = [item for item in self.memory.due_reminders() if now - item.due <= LATE_REMINDER_LIMIT]
+        if not items:
+            return ""
+        print(f"[MEMORY] {len(items)} reminder(s) due")
+        return "Reminder: " + "; ".join(item.spoken() for item in items) + "."
+
+    def briefing(self) -> str:
+        """What is still ahead today, said once at startup."""
+        now = self.memory.now()
+        items = [item for item in self.memory.scheduled_on(now.date()) if not item.has_time or item.due > now]
+        if not items:
+            return ""
+        return "Today you have: " + "; ".join(item.spoken() for item in items) + "."
+
     def run(self, source: InputSource, welcome: str | None = None) -> None:
         if welcome:
-            self.indicator.show(IndicatorState.SPEAKING)
-            self.speaker.say(welcome)
+            self._say(welcome)
+        for notice in (self.due_announcement(), self.briefing()):
+            if notice:
+                self._say(notice)
         self.indicator.show(IndicatorState.IDLE)
         while True:
+            # Listening times out every MAX_WAIT_FOR_SPEECH_SECONDS, so reminders are
+            # checked at least that often.
+            notice = self.due_announcement()
+            if notice:
+                self._say(notice)
             text = source.next_utterance()
             if text is None:
                 break

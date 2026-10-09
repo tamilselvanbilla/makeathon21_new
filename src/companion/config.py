@@ -115,7 +115,7 @@ class CaptureConfig:
             sample_rate=16_000,
             max_record_seconds=_env_float("MAX_RECORD_SECONDS", 15),
             max_wait_for_speech_seconds=_env_float("MAX_WAIT_FOR_SPEECH_SECONDS", 30),
-            silence_seconds=_env_float("SILENCE_SECONDS", 0.8),
+            silence_seconds=_env_float("SILENCE_SECONDS", 1.2),
             speech_rms_threshold=_env_float("SPEECH_RMS_THRESHOLD", 450),
             # Consecutive 80 ms frames above the threshold that count as speech starting;
             # on the Pi, half of the room's noise bursts were 1-2 frames long.

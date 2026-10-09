@@ -42,7 +42,7 @@ Defaults marked **Pi / other** differ by platform. A Raspberry Pi is detected fr
 | `MIC_DEVICE` | *(automatic)* | Index or part of the name of the input device (`scripts/run.sh --list-mics`). Unset: the system default input, else the first USB/ReSpeaker/"mic" device that isn't a loopback or monitor |
 | `SPEECH_ONSET_FRAMES` | `3` | Consecutive 80 ms frames above the threshold that count as speech starting, so clicks and bumps don't start a recording. Only 0.5 s before that is kept |
 | `SPEECH_RMS_THRESHOLD` | `450` | Loudness that counts as speech (int16 RMS). Lower for quiet mics, higher for noisy rooms |
-| `SILENCE_SECONDS` | `0.8` | Silence that ends an utterance |
+| `SILENCE_SECONDS` | `1.2` | Silence that ends an utterance (0.8 split "remember that … meeting tomorrow" in two on the Pi) |
 | `MAX_RECORD_SECONDS` | `15` | Hard cap on one utterance |
 | `MAX_WAIT_FOR_SPEECH_SECONDS` | `30` | How long one listening window waits for speech before restarting |
 
@@ -109,7 +109,7 @@ entries to ask about more companies; the longest name is the one spoken in repli
 |---|---|---|
 | `MEMORY` | `1` | `0` keeps memory in RAM for the current session only; nothing is written to disk |
 | `MEMORY_FILE` | `data/memory.sqlite3` | Where notes and past conversations are stored (git-ignored) |
-| `MEMORY_RETENTION_DAYS` | `30` | Older entries are deleted at startup |
+| `MEMORY_RETENTION_DAYS` | `30` | Past questions and answers older than this are deleted at startup; notes and reminders are kept until deleted |
 | `FOLLOW_UP_MINUTES` | `10` | How recent the previous question must be for "and my wife's?" to build on it |
 | `MEMORY_TOP_K` | `3` | Remembered items given to the model per question |
 | `MEMORY_EMBEDDINGS` | `1` | `0` uses keyword search only (no embedding model loaded, ~90 MB less RAM) |
@@ -139,11 +139,22 @@ Voice commands:
 
 | Say | Effect |
 |---|---|
-| "Remember (that) …", "Note (that) …", "Make a note …" | Saves a note; confirmed as "Okay, I'll remember that you …" |
+| "Remember (that) …", "Note (that) …", "Make a note …", "Don't forget …", "Save a note …" | Saves a note; confirmed as "Okay, I'll remember that you …". Relative dates are resolved ("tomorrow at 7am" → "on Saturday 10 October at 7:00 AM") |
+| "Remember that." / "Remind me." with nothing after it (a pause) | Asks "What should I remember?" and saves the next sentence |
+| "Remind me to call mom at 6 pm", "Remind me in 10 minutes to …" | Saves "you need to call mom …" and announces it when due (checked every `MAX_WAIT_FOR_SPEECH_SECONDS` while listening, and at startup) |
+| A statement with a date, time, place or task: "I have a meeting with Jay tomorrow", "I parked on B2", "My wife asked me to buy vegetables" | Asks "Do you want me to remember that …?"; "yes" saves it, "no" or another question drops it |
+| "What's my schedule tomorrow?", "Do I have anything on Monday?", "What are my reminders?" | Lists the dated notes for that day, or the coming week, without the model |
 | "Forget that", "Forget the last thing", "Delete that" | Deletes the most recent note or exchange |
 | "Forget everything", "Clear your memory" | Deletes all memory |
 
-To inspect memory on the device: `sqlite3 data/memory.sqlite3 "SELECT created, kind, question, answer FROM memory"`.
+The model never saves anything itself; if it replies "I'll keep that in mind", the app
+replaces that with "I haven't saved that. Do you want me to remember …?".
+
+At startup the assistant reads out reminders missed in the last 12 hours and what is still
+ahead today.
+
+To inspect memory on the device: `sqlite3 data/memory.sqlite3 "SELECT created, kind, question, answer FROM memory"`
+and `sqlite3 data/memory.sqlite3 "SELECT * FROM schedule"`.
 
 ## Set by `scripts/run.sh`
 

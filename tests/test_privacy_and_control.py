@@ -639,8 +639,13 @@ class MemoryTests(unittest.TestCase):
             path = Path(folder) / "memory.sqlite3"
             ConversationMemory(path, clock=self.clock).add_note("I parked on level B2")
             self.assertIn("B2", ConversationMemory(path, clock=self.clock).context_for("where did I park"))
+            self.memory = ConversationMemory(path, clock=self.clock)
+            self.memory.add_turn("what is my EMI", "Your EMI is INR 9200.")
             self.clock.advance(days=31)
-            self.assertEqual(ConversationMemory(path, clock=self.clock).context_for("where did I park"), "")
+            restarted = ConversationMemory(path, clock=self.clock)
+            # Notes stay until the user deletes them; past turns expire.
+            self.assertIn("B2", restarted.context_for("where did I park"))
+            self.assertEqual(restarted.context_for("what did you tell me about my EMI?"), "")
 
 
 class ConceptEmbedder:
@@ -762,6 +767,106 @@ class AssistantMemoryTests(unittest.TestCase):
         quietly(assistant.respond, "What about in Mumbai?")
         geocoded = [params["name"] for url, params in fetch.sent if url == GEOCODING_URL]
         self.assertEqual(geocoded, ["Bengaluru", "Mumbai"])
+
+
+class NoteAndScheduleTests(unittest.TestCase):
+    """The cases from a Raspberry Pi session where notes were lost or not recognised."""
+
+    def setUp(self):
+        self.clock = Clock(datetime(2026, 10, 9, 21, 15))  # Friday evening
+        self.memory = ConversationMemory(clock=self.clock)
+        self.llm = FakeLLM()
+        self.assistant, _, self.speaker = make_assistant(llm=self.llm, memory=self.memory)
+
+    def say(self, text):
+        return quietly(self.assistant.respond, text)[0]
+
+    def test_where_did_i_park_finds_a_note_without_the_word_park(self):
+        self.say("Remember that I have got my car on level B2.")
+        self.assertEqual(self.say("Where did I park my car?"), "On 9 October you told me that you have got your car on level B2.")
+
+    def test_note_outranks_a_past_turn_repeating_it(self):
+        self.say("Remember that I have got my car on level B2.")
+        self.say("Where did I park my car?")  # stored as a turn
+        self.assertEqual(self.say("Where did I park my car?"), "On 9 October you told me that you have got your car on level B2.")
+
+    def test_tasks_are_offered(self):
+        self.assertEqual(self.say("My wife asked me to buy vegetables on the way home"),
+                         "Do you want me to remember that your wife asked you to buy vegetables on the way home?")
+
+    def test_bare_remember_waits_for_the_content(self):
+        self.assertEqual(self.say("Please remember that."), "Sure. What should I remember?")
+        reply = self.say("meeting with Jay tomorrow at 7am.")
+        self.assertEqual(reply, "Okay, I'll remember: meeting with Jay on Saturday 10 October at 7:00 AM, and remind you then.")
+        self.assertEqual(self.say("When is my meeting with Jay?"),
+                         "On 9 October you told me: meeting with Jay on Saturday 10 October at 7:00 AM.")
+        self.assertEqual(self.say("When is the meeting?"), "Tomorrow, 10 October: meeting with Jay at 7:00 AM.")
+        self.assertEqual(self.llm.calls, [])
+
+    def test_remind_me_to(self):
+        reply = self.say("Remind me to call mom at 6 pm tomorrow")
+        self.assertEqual(reply, "Okay, I'll remember that you need to call mom on Saturday 10 October at 6:00 PM, and remind you then.")
+        self.assertEqual(self.say("Remind me"), "Sure. What should I remind you to do?")
+        self.assertIn("you need to buy milk", self.say("buy milk"))
+
+    def test_statement_with_a_date_is_offered_and_saved_on_yes(self):
+        self.assertEqual(self.say("I have a meeting with Jay tomorrow."), "Do you want me to remember that you have a meeting with Jay tomorrow?")
+        self.assertEqual(self.say("Yes please"), "Okay, I'll remember that you have a meeting with Jay on Saturday 10 October.")
+        self.assertEqual(self.llm.calls, [])
+
+    def test_statement_declined_or_ignored_is_not_saved(self):
+        self.say("I parked on level B2")
+        self.assertEqual(self.say("No"), "Okay, I won't remember it.")
+        self.say("I lent my drill to Ravi")
+        self.say("what is my EMI")  # moved on: answered normally
+        self.assertEqual(self.memory.search("who has my drill"), [])
+        self.assertEqual(len(self.llm.calls), 1)
+
+    def test_questions_are_not_saved_as_notes(self):
+        self.assertIsNone(parse_memory_command("Do you remember where I parked?"))
+        self.assertIsNone(parse_memory_command("remember where I parked?"))
+
+    def test_schedule_for_a_day(self):
+        self.say("Remember I have a meeting with Jay tomorrow at 7am")
+        self.say("Remind me to pay rent on Monday")
+        self.assertEqual(self.say("What is my schedule looks like tomorrow?"),
+                         "Tomorrow, 10 October: you have a meeting with Jay at 7:00 AM.")
+        self.assertEqual(self.say("Do I have any meetings today?"), "You have nothing noted for today, 9 October.")
+        self.assertEqual(self.say("What are my reminders?"),
+                         "Tomorrow, 10 October: you have a meeting with Jay at 7:00 AM. "
+                         "Monday, 12 October: you need to pay rent.")
+        # A question with a subject is answered from the note, not as a schedule.
+        self.assertIn("7:00 AM", self.say("What time is my meeting with Jay?"))
+
+    def test_due_reminder_is_announced_once(self):
+        self.say("Remind me to take my tablet in 10 minutes")
+        self.assertEqual(self.assistant.due_announcement(), "")
+        self.clock.advance(minutes=10)
+        self.assertEqual(self.assistant.due_announcement(), "Reminder: you need to take your tablet at 9:25 PM.")
+        self.assertEqual(self.assistant.due_announcement(), "")
+
+    def test_reminders_survive_a_restart(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "memory.sqlite3"
+            ConversationMemory(path, clock=self.clock).add_note("I have a meeting with Jay tomorrow at 7am")
+            self.clock.advance(hours=9)  # 6:15 next morning, device restarted
+            assistant, _, _ = make_assistant(memory=ConversationMemory(path, clock=self.clock))
+            self.assertEqual(assistant.briefing(), "Today you have: you have a meeting with Jay at 7:00 AM.")
+            self.clock.advance(minutes=45)
+            self.assertEqual(assistant.due_announcement(), "Reminder: you have a meeting with Jay at 7:00 AM.")
+            self.assertEqual(ConversationMemory(path, clock=self.clock).due_reminders(), [])
+
+    def test_model_cannot_claim_to_remember(self):
+        self.llm.reply = "Okay, I will keep this in mind."
+        reply = self.say("The plumber is coming on Monday")
+        self.assertEqual(reply, "I haven't saved that. Do you want me to remember that the plumber is coming on Monday?")
+        self.assertEqual(self.say("yes"), "Okay, I'll remember that the plumber is coming on Monday 12 October.")
+
+    def test_forget_removes_the_reminder(self):
+        self.say("Remind me to call mom in 5 minutes")
+        self.say("forget that")
+        self.clock.advance(minutes=5)
+        self.assertEqual(self.assistant.due_announcement(), "")
 
 
 class MarketTests(unittest.TestCase):

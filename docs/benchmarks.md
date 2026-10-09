@@ -159,8 +159,9 @@ Lessons:
 .venv/bin/python scripts/eval_memory_retrieval.py --models minilm-int8 [minilm bge-small]
 ```
 
-15 notes, 34 questions that should find a note and 13 that must find nothing
-(`tests/data/memory_retrieval_eval.json`). Laptop, 2 threads.
+16 notes, 37 questions that should find a note and 15 that must find nothing
+(`tests/data/memory_retrieval_eval.json`; the last 5 come from a Raspberry Pi session).
+Laptop, 2 threads. The table below was measured on the first 15 notes and 47 questions.
 
 | Method | Finds | Rejects | Download | RAM | Per question |
 |---|---|---|---|---|---|
@@ -168,6 +169,12 @@ Lessons:
 | **Keywords + MiniLM int8 (default)** | **94%** | 62% | 23 MB | ~90 MB | ~1 ms |
 | Keywords + MiniLM full precision | 94% | 62% | 90 MB | ~185 MB | ~2 ms |
 | Keywords + bge-small (threshold 0.65) | 79% | 85% | 133 MB | ~230 MB | ~7 ms |
+
+On the extended set (Oct 2026: notes stored with resolved dates, memory-only synonyms such
+as park → level), the shipped hybrid finds 92% and rejects 47%; 9/9 wrong answers are
+hedged. A lower similarity bar for notes sharing some of the question's words (0.25) was
+tried and dropped: it added a wrong match ("who borrowed my ladder?" → the drill) and found
+nothing new.
 
 No method rejects near-misses ("wife's birthday" when only mom's is stored), so answers
 found only by meaning are hedged; in the benchmark all wrong matches were hedged. See
