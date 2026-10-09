@@ -192,6 +192,8 @@ class AppConfig:
     knowledge: KnowledgeConfig
     memory: MemoryConfig
     online_lookups_enabled: bool
+    online_kinds: tuple[str, ...]
+    market_symbols_file: Path
     default_place: str
     tts_enabled: bool
 
@@ -205,6 +207,15 @@ class AppConfig:
             knowledge=KnowledgeConfig.from_env(),
             memory=MemoryConfig.from_env(),
             online_lookups_enabled=_env_bool("ONLINE_LOOKUPS", True),
+            # Each online feature can be switched off on its own; ONLINE_LOOKUPS=0 disables all.
+            online_kinds=tuple(
+                kind
+                for kind, variable in (("weather", "ONLINE_WEATHER"), ("market", "ONLINE_MARKET"), ("news", "ONLINE_NEWS"))
+                if _env_bool(variable, True)
+            ),
+            market_symbols_file=Path(
+                os.getenv("MARKET_SYMBOLS_FILE", str(PROJECT_ROOT / "knowledge_base" / "market_symbols.json"))
+            ),
             # Place used for weather questions that don't name one.
             default_place=os.getenv("DEFAULT_PLACE", "Bengaluru"),
             tts_enabled=_env_bool("TTS_ENABLED", True),

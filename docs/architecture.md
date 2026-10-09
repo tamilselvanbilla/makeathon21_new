@@ -112,7 +112,9 @@ continues, so an always-on device does not die on one bad request.
 | `companion/device/indicator.py` | Listening-light states | `IndicatorState`, `Indicator`, `ConsoleIndicator` |
 | `companion/device/mute.py` | Mute switch | `MuteSwitch`, `SoftwareMuteSwitch` |
 | `companion/device/tts.py` | Spoken output: espeak-ng + aplay on Linux (no sound server needed), pyttsx3 elsewhere | `Speaker`, `EspeakSpeaker`, `Pyttsx3Speaker`, `PrintSpeaker`, `make_speaker` |
-| `companion/online_gateway.py` | The only network exit | `OnlineGateway`, `LookupResult`, `LookupUnavailable` |
+| `companion/online_gateway.py` | The only network exit: weather, market, news; validation, allowlist, cache, per-feature switches | `OnlineGateway`, `LookupRequest`, `LookupResult`, `LookupUnavailable` |
+| `companion/brain/market.py` | Portfolio: which symbols to fetch, all values and gains computed locally | `Portfolio`, `Holding` |
+| `companion/brain/news.py` | Which feeds to fetch; topic filtering on the device | `news_request`, `headlines_reply` |
 | `companion/telemetry.py` | JSON timing log without content | `log_event`, `timed_event` |
 
 ## Knowledge retrieval
@@ -183,10 +185,13 @@ or to an honest "not found".
 |---|---|
 | Only the gateway may use the network | `test_only_gateway_imports_network_libraries` parses every module and fails if any other file imports `socket`, `urllib.request`, `http.client`, `requests`, `httpx`, `urllib3`, or `aiohttp` |
 | Neither audio nor the question can be sent | `OnlineGateway.lookup` accepts only a `LookupRequest(kind, place, day)` built locally by `parse_lookup`, and raises `TypeError` for anything else, including plain strings (tested with text, bytes and NumPy arrays) |
-| Only place names go out | `PLACE_PATTERN` rejects anything that isn't a short place name, e.g. "my salary is 85000" |
-| Only factual lookups go out | `route` sends a question online only if it is about weather/news/search and mentions no financial, medical, document, recording, personal, or private data; only weather is implemented |
+| Only public identifiers go out | Weather: `PLACE_PATTERN` (a short place name, not "my salary is 85000"). Market: `SYMBOL_PATTERN` and `FUND_CODE_PATTERN` (ticker symbols, numeric codes). News: only keys of the built-in `FEEDS`. Anything else is refused before sending |
+| Holdings never go out | `Portfolio.request` always sends the whole watchlist (the primary user's holdings plus indices), so the request doesn't reveal which holding was asked about; quantities and prices paid stay local, and values and gains are computed in Python, not by the LLM |
+| Topics never go out | News fetches whole feeds; `headlines_reply` keeps headlines containing every topic word |
+| Only factual lookups go out | Weather, market and news only; anything else (e.g. "search") is refused |
+| Replies show the boundary | "From Yahoo Finance and AMFI, online: … Computed on this device: …"; console `[ONLINE]`/`[LOCAL]` lines; the LED shows `ONLINE` |
 | Only known hosts are contacted | `check_host_allowed` validates each URL against `ALLOWED_HOSTS` |
-| Users can switch it off | `--offline` or `ONLINE_LOOKUPS=0` |
+| Users can switch it off | `--offline` or `ONLINE_LOOKUPS=0` for everything; `ONLINE_WEATHER`, `ONLINE_MARKET`, `ONLINE_NEWS` per feature |
 | Models never phone home | Whisper loads with `local_files_only=True` (without it, faster-whisper contacts huggingface.co at every start); the LLM and embedding models are plain local files; `run.sh` also sets `HF_HUB_OFFLINE=1` |
 | Online moments are visible | The indicator shows `ONLINE` only while the gateway is in use |
 
@@ -250,13 +255,14 @@ class GpioMuteSwitch:
         ...  # read the switch's GPIO pin
 ```
 
-### Online provider (e.g. news)
+### Online provider (e.g. currency rates)
 
-In `online_gateway.py`: add the host to `ALLOWED_HOSTS`, handle the new
-`request.kind` in `lookup`, fetch with `self._fetch(url, params)` (which enforces the
-allowlist and is replaced by a fake in tests), and return
-`LookupResult(source=..., text=...)`. Keep all networking code inside this file, and
-send only the fields of `LookupRequest`.
+In `online_gateway.py`: add the host to `ALLOWED_HOSTS` and the kind to `KINDS`, validate
+its fields in `_validate`, implement `_<kind>(request)` using `self._get(...)` (which
+enforces the allowlist, caches, reuses stale data when offline, and is replaced by a fake
+in tests), and return `LookupResult(source, text, data)`. Add an `ONLINE_<KIND>` switch in
+`config.py`. Keep all networking code in this file, send only `LookupRequest` fields, and
+do any computation on the result locally.
 
 ### Different wake phrase
 
@@ -278,7 +284,8 @@ models, only configuration changes are needed (see [configuration.md](configurat
 | Limitation | Planned fix |
 |---|---|
 | Mute switch and LED are software/console only | GPIO drivers (interfaces are ready) |
-| Only weather is available online; news and search are refused | News provider (RSS) behind the same gateway |
+| Share prices use Yahoo Finance's unofficial, undocumented endpoint, which may change or rate-limit | Provider is swappable in `online_gateway.py`; cached results and an honest "couldn't get live prices" fallback to saved records |
+| News is read out as verbatim headlines, not summarised (the 0.6B model could distort them) | A larger model could summarise |
 | The 0.6B model's one-line weather advice can misjudge probabilities (e.g. "likely to rain" at 14%) | The facts are always read out verbatim first; a larger model or rule-based advice |
 | Fallback check flags any answer containing "can't" | Fall back on signals (empty retrieval, out-of-scope intent) instead of keywords |
 | Memory can't reject near-misses ("wife's birthday" vs mom's) | They are answered with a hedge and the note quoted verbatim |

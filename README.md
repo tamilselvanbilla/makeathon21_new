@@ -42,7 +42,7 @@ keeps working with the network cable unplugged.
 |---|---|---|
 | All reasoning on-device, no cloud LLM | ✅ Done | Qwen3-0.6B Q4 via llama.cpp: `brain/llm.py` |
 | Raw audio never leaves the device | ✅ Done | Audio held in RAM only; the gateway accepts text only, and a test fails if any other module imports a network library |
-| Online calls limited to factual lookups | ✅ Done | Weather via Open-Meteo: only the place name and day leave the device; the reply reads the online facts with their source, then adds local advice. News/search are refused honestly |
+| Online calls limited to factual lookups | ✅ Done | Weather (Open-Meteo), **share market** (Yahoo Finance prices, AMFI fund NAVs) and **news** (The Hindu, BBC RSS). Only public identifiers leave the device (a place, ticker symbols, fund codes, a feed address); holdings, topics and questions stay local, and all arithmetic is done on the device. Each feature can be switched off |
 | Honest fallback instead of guessing | 🟡 Basic | `brain/policy.py`; signal-based fallback is planned |
 | Working demo in a human-potential domain | ✅ Memory & recall | Personal records (`knowledge_base/`), notes ("remember that I parked on B2"), past conversations ("what did you tell me about my EMI?") and follow-ups ("and my wife's?"), all stored on the device. Hybrid search (keywords + a 23 MB embedding model) finds paraphrases ("power tool", "travel documents"); answers found only by meaning are hedged |
 | Continuous sensing with **wake word** | ✅ Done | "Hey Jarvis" spotted in Whisper transcripts (no wake-word model, MIT licence); after waking, follow-up questions need no wake phrase until 30 s of silence or "that's all" |
@@ -101,6 +101,9 @@ Try asking:
 - "Remember that I parked on level B2" … later, even after a restart: "Where did I park?"
 - "What is my monthly income?" then "And my wife's?"; later "What did you tell me about my wife's income?"
 - "Forget that" / "Forget everything"
+- "How are my investments doing today?" (only `INFY.NS`, `^NSEI`, `^BSESN` and fund code `120377` go online; values and gains are computed on the device)
+- "What's the Nifty at?" / "What is the TCS share price?"
+- "Latest business news" / "Any news about TCS?" (whole feeds are downloaded; "TCS" is matched on the device)
 - "Exit" (stops the session)
 
 The `[LED] ...` lines in the console show the indicator state: `IDLE`, `LISTENING`,

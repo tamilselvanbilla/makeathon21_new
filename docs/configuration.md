@@ -69,10 +69,34 @@ the device's native rate and resampled.
 | Variable | Default | Description |
 |---|---|---|
 | `ONLINE_LOOKUPS` | `1` | `0` disables the online gateway entirely (same as `--offline`) |
+| `ONLINE_WEATHER` | `1` | `0` switches off weather lookups |
+| `ONLINE_MARKET` | `1` | `0` switches off share prices and fund NAVs; portfolio questions are then answered from the saved records |
+| `ONLINE_NEWS` | `1` | `0` switches off news headlines |
 | `DEFAULT_PLACE` | `Bengaluru` | Place used for weather questions that don't name one ("will it rain today?") |
+| `MARKET_SYMBOLS_FILE` | `knowledge_base/market_symbols.json` | Company and index names the assistant may look up, mapped to symbols |
 
-Only weather is supported (Open-Meteo, no API key). The question is parsed on the
-device and only the place name and the day ("today"/"tomorrow") are sent.
+Startup prints which are on, e.g. `Online lookups: market, news, weather`. No source needs an
+API key. What each sends:
+
+| Feature | Source | Sent | Kept on the device |
+|---|---|---|---|
+| Weather | Open-Meteo | Place name, then its coordinates | The question |
+| Market | Yahoo Finance (prices; **unofficial endpoint**, may change), mfapi.in (AMFI's official NAVs) | The **whole watchlist** of symbols and fund codes, whatever was asked | Quantities, prices paid, all values and gains, the question |
+| News | The Hindu (business, national, technology), BBC News (world) RSS | Nothing but the fixed feed address | The topic: headlines are filtered on the device |
+
+Results are cached (prices 5 min, NAVs 6 h, news 15 min, weather 10 min). If a refresh fails,
+the cached copy is used and the reply says when it was fetched.
+
+### Market data
+
+Holdings come from `knowledge_base/personal_data.json`: a `stock` record needs `ticker`
+(Yahoo symbol, e.g. `INFY.NS`), `quantity` and `purchase_price`; a `mutual_fund` record needs
+`scheme_code` (AMFI code, e.g. `120377`, findable at `https://api.mfapi.in/mf/search?q=<name>`),
+`units` and `investment_amount`. Only the primary user's holdings are used.
+
+`knowledge_base/market_symbols.json` maps spoken names to symbols for companies you don't
+hold ("TCS" → `TCS.NS`) and lists the `indices` always fetched (Nifty 50, Sensex). Add
+entries to ask about more companies; the longest name is the one spoken in replies.
 
 ## Wake phrase and conversation
 

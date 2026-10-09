@@ -7,6 +7,7 @@ from typing import Protocol
 import numpy as np
 
 from .brain.knowledge import KnowledgeBase
+from .brain.market import Portfolio
 from .brain.memory import (
     ConversationMemory,
     MemoryCommand,
@@ -17,6 +18,7 @@ from .brain.memory import (
     second_person,
 )
 from .brain.policy import LOCAL_FALLBACK_ANSWER, require_local_answer, should_fallback
+from .brain.news import headlines_reply, is_news_question, news_request
 from .brain.prompts import NOT_IN_RECORDS_ANSWER, build_advice_prompt, build_system_prompt, build_user_prompt
 from .brain.router import Intent, extract_place, parse_lookup, route
 from .brain.wake import WakePhrase, is_sleep_command
@@ -161,7 +163,9 @@ class Assistant:
         speaker: Speaker,
         default_place: str = "Bengaluru",
         memory: ConversationMemory | None = None,
+        portfolio: Portfolio | None = None,
     ):
+        self.portfolio = portfolio
         self.default_place = default_place
         self.memory = memory or ConversationMemory()
         self.llm = llm
@@ -180,7 +184,11 @@ class Assistant:
         previous = self.memory.last_turn() if is_follow_up(text) else None
         # "And my wife's?" is searched and routed as "<previous question> and my wife's?".
         effective = f"{previous.question} {text}" if previous else text
-        if route(effective) is Intent.ONLINE_LOOKUP:
+        if is_news_question(text):
+            reply, keep = self._respond_with_news(text)
+        elif self._is_market_question(effective):
+            reply, keep = self._respond_with_market(text, effective, previous)
+        elif route(effective) is Intent.ONLINE_LOOKUP:
             reply, keep = self._respond_with_lookup(text, effective)
         else:
             reply, keep = self._respond_locally(text, effective, previous)
@@ -206,6 +214,40 @@ class Assistant:
             self.llm.chat(self.system_prompt, build_user_prompt(text, knowledge, remembered, earlier))
         )
         return answer, answer != LOCAL_FALLBACK_ANSWER
+
+    def _is_market_question(self, text: str) -> bool:
+        # With market lookups switched off, these questions are answered from the records.
+        return bool(self.portfolio) and "market" in self.gateway.kinds and self.portfolio.is_market_question(text)
+
+    def _respond_with_market(self, text: str, effective: str, previous) -> tuple[str, bool]:
+        """Live prices online (symbols only); holdings and all arithmetic on the device."""
+        request, focus = self.portfolio.request(effective)
+        self.indicator.show(IndicatorState.ONLINE)
+        try:
+            result = self.gateway.lookup(request)
+        except LookupUnavailable as exc:
+            print(f"[ONLINE] market lookup not performed: {exc}")
+            reply, keep = self._respond_locally(text, effective, previous)
+            return f"I couldn't get live prices, so this is from your saved records, which may be out of date. {reply}", keep
+        print(f"[ONLINE] sent only symbols={list(request.symbols)} fund codes={list(request.fund_codes)}")
+        self.indicator.show(IndicatorState.THINKING)
+        print("[LOCAL] computing values and gains from your holdings on-device")
+        return self.portfolio.answer(result, focus), True
+
+    def _respond_with_news(self, text: str) -> tuple[str, bool]:
+        """Whole feeds online; the topic is matched against headlines on the device."""
+        query = news_request(text)
+        self.indicator.show(IndicatorState.ONLINE)
+        try:
+            result = self.gateway.lookup(query.request)
+        except LookupUnavailable as exc:
+            print(f"[ONLINE] news lookup not performed: {exc}")
+            return f"I couldn't get the news. {exc} I won't guess.", False
+        print(f"[ONLINE] fetched feeds={list(query.request.feeds)} (topic not sent)")
+        self.indicator.show(IndicatorState.THINKING)
+        if query.topic:
+            print(f"[LOCAL] filtering {len(result.data)} headlines for the topic on-device")
+        return headlines_reply(result, query), True
 
     def _memory_command(self, command: MemoryCommand) -> str:
         if command.action == "remember":

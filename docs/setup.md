@@ -250,6 +250,22 @@ Restart the assistant, then ask "Where did I park?": "On 9 October you told me t
 you parked on level B2." The console shows `[MEMORY] using 1 remembered item(s)`
 whenever memory contributes. "Forget that" and "Forget everything" erase it.
 
+### Share market and news
+
+```
+You: how are my investments doing today?
+[ONLINE] sent only symbols=['INFY.NS', '^NSEI', '^BSESN'] fund codes=['120377']
+[LOCAL] computing values and gains from your holdings on-device
+Assistant: From Yahoo Finance and AMFI, online: Nifty 50 is at ... Computed on this device:
+           Your 10 Infosys shares are worth ... This is information, not investment advice.
+
+You: any news about TCS?
+[ONLINE] fetched feeds=['business', 'india', 'technology', 'world'] (topic not sent)
+[LOCAL] filtering 214 headlines for the topic on-device
+```
+
+Switch either off with `ONLINE_MARKET=0` or `ONLINE_NEWS=0`.
+
 ### Online lookup
 
 Ask "what's the weather in Mysore tomorrow?". The console shows exactly what left

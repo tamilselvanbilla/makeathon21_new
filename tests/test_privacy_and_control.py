@@ -30,6 +30,8 @@ from companion.config import CaptureConfig  # noqa: E402
 from companion.device.indicator import ConsoleIndicator, IndicatorState  # noqa: E402
 from companion.device.mute import SoftwareMuteSwitch  # noqa: E402
 from companion.device.tts import EspeakSpeaker  # noqa: E402
+from companion.brain.market import Portfolio  # noqa: E402
+from companion.brain.news import news_request  # noqa: E402
 from companion.online_gateway import (  # noqa: E402
     FORECAST_URL,
     GEOCODING_URL,
@@ -103,6 +105,27 @@ FORECAST = {
 }
 
 
+def chart(price, previous, name):
+    return {"chart": {"result": [{"meta": {
+        "shortName": name, "regularMarketPrice": price, "chartPreviousClose": previous, "currency": "INR"}}]}}
+
+
+QUOTES = {
+    "INFY.NS": chart(1023.4, 997.0, "INFOSYS LIMITED"),
+    "%5ENSEI": chart(22520.45, 22603.1, "NIFTY 50"),
+    "%5EBSESN": chart(72472.33, 72638.7, "S&P BSE SENSEX"),
+    "TCS.NS": chart(2156.0, 2075.0, "TATA CONSULTANCY SERV LT"),
+}
+NAV = {"meta": {"scheme_name": "ICICI Prudential Balanced Advantage Fund - Direct Plan - Growth"},
+       "data": [{"date": "08-10-2026", "nav": "84.40000"}]}
+RSS = """<?xml version="1.0"?><rss><channel>
+<item><title>TCS builds higher bench</title><pubDate>Fri, 09 Oct 2026 10:00:00 +0530</pubDate></item>
+<item><title>Stock markets rebound led by TCS</title><pubDate>Fri, 09 Oct 2026 09:00:00 +0530</pubDate></item>
+<item><title>Coal supplies rise 36%</title><pubDate>Fri, 09 Oct 2026 11:00:00 +0530</pubDate></item>
+<item><title>Cricket betting racket busted</title><pubDate>Fri, 09 Oct 2026 08:00:00 +0530</pubDate></item>
+</channel></rss>"""
+
+
 class FakeFetch:
     """Stands in for the network: records what would have been sent."""
 
@@ -111,12 +134,24 @@ class FakeFetch:
         self.fail = fail
         self.sent = []
 
-    def __call__(self, url, params):
+    def __call__(self, url, params, as_text=False):
         check_host_allowed(url)
         self.sent.append((url, params))
         if self.fail:
-            raise LookupUnavailable("I couldn't reach the weather service.")
+            raise LookupUnavailable("I couldn't reach the service.")
+        if "finance.yahoo" in url:
+            symbol = url.rsplit("/", 1)[1]
+            if symbol not in QUOTES:
+                raise LookupUnavailable("unknown symbol")
+            return QUOTES[symbol]
+        if "mfapi" in url:
+            return NAV
+        if as_text:
+            return RSS
         return self.geocode if url == GEOCODING_URL else FORECAST
+
+    def sent_text(self):
+        return " ".join(f"{url} {params}" for url, params in self.sent)
 
 
 def frames(*levels):
@@ -205,7 +240,24 @@ class Clock:
         self.now += timedelta(**delta)
 
 
-def make_assistant(llm=None, gateway=None, memory=None):
+HOLDINGS = {
+    "financial": [
+        {"owner": "John", "record_type": "stock", "company": "Infosys Ltd.", "ticker": "INFY.NS",
+         "quantity": 10, "purchase_price": 1750},
+        {"owner": "John", "record_type": "mutual_fund", "scheme": "ICICI Prudential Balanced Advantage Fund",
+         "scheme_code": 120377, "units": 323.5, "investment_amount": 25000},
+        {"owner": "John's wife", "record_type": "stock", "company": "Wipro", "ticker": "WIPRO.NS",
+         "quantity": 99, "purchase_price": 400},
+    ]
+}
+SYMBOLS_FILE = ROOT / "knowledge_base" / "market_symbols.json"
+
+
+def make_portfolio():
+    return Portfolio.load(HOLDINGS, "John", SYMBOLS_FILE)
+
+
+def make_assistant(llm=None, gateway=None, memory=None, portfolio=None):
     indicator = RecordingIndicator()
     speaker = FakeSpeaker()
     assistant = Assistant(
@@ -213,6 +265,7 @@ def make_assistant(llm=None, gateway=None, memory=None):
         knowledge=KnowledgeBase(SAMPLE_RECORDS),
         gateway=gateway or OnlineGateway(enabled=True, fetch=FakeFetch()),
         memory=memory,
+        portfolio=portfolio,
         indicator=indicator,
         speaker=speaker,
     )
@@ -617,6 +670,136 @@ class AssistantMemoryTests(unittest.TestCase):
         quietly(assistant.respond, "What about in Mumbai?")
         geocoded = [params["name"] for url, params in fetch.sent if url == GEOCODING_URL]
         self.assertEqual(geocoded, ["Bengaluru", "Mumbai"])
+
+
+class MarketTests(unittest.TestCase):
+    def setUp(self):
+        self.portfolio = make_portfolio()
+
+    def ask(self, text, fetch=None):
+        request, focus = self.portfolio.request(text)
+        return self.portfolio.answer(OnlineGateway(fetch=fetch or FakeFetch()).lookup(request), focus)
+
+    def test_market_questions_vs_local_ones(self):
+        for text in ("how are my investments doing today?", "how is Infosys doing?", "what's the Nifty at?",
+                     "TCS share price", "current value of my mutual fund"):
+            self.assertTrue(self.portfolio.is_market_question(text), text)
+        for text in ("what are my investments", "where did I work before infosys", "what is my EMI",
+                     "what is my current role"):
+            self.assertFalse(self.portfolio.is_market_question(text), text)
+
+    def test_only_the_owners_holdings_and_whole_watchlist_are_requested(self):
+        request, focus = self.portfolio.request("how is Infosys doing?")
+        self.assertEqual(request.symbols, ("INFY.NS", "^NSEI", "^BSESN"))  # same watchlist whatever was asked
+        self.assertEqual(request.fund_codes, ("120377",))
+        self.assertNotIn("WIPRO.NS", request.symbols)  # someone else's holding
+        self.assertEqual(focus, ["INFY.NS"])
+        self.assertIn("TCS.NS", self.portfolio.request("TCS share price")[0].symbols)
+
+    def test_holdings_never_leave_the_device(self):
+        fetch = FakeFetch()
+        self.ask("how are my investments doing?", fetch)
+        sent = fetch.sent_text()
+        for private in ("1750", "323.5", "25000", "10,234", "Infosys Ltd"):
+            self.assertNotIn(private, sent)
+
+    def test_values_and_gains_are_computed_locally(self):
+        reply = self.ask("how are my investments doing today?")
+        self.assertTrue(reply.startswith("From Yahoo Finance and AMFI, online: Nifty 50 is at 22,520.45, down 0.4 percent"))
+        self.assertIn("Your 10 Infosys shares are worth 10,234 rupees, 7,266 rupees below what you paid, "
+                      "down 41.5 percent.", reply)
+        self.assertIn("323.5 units of ICICI Prudential Balanced Advantage Fund are worth 27,303 rupees, "
+                      "2,303 rupees above", reply)
+        self.assertIn("In total these are worth 37,537 rupees, 4,963 rupees below the 42,500 you invested", reply)
+        self.assertTrue(reply.endswith("This is information, not investment advice."))
+
+    def test_focus_on_funds_indices_or_a_named_company(self):
+        fund = self.ask("what is the current value of my mutual fund?")
+        self.assertIn("NAV is 84.40 rupees, as of 8 October", fund)
+        self.assertNotIn("Infosys", fund)
+        self.assertNotIn("Computed on this device", self.ask("what's the Nifty at?"))
+        # The local name, not Yahoo's truncated "TATA CONSULTANCY SERV LT".
+        self.assertIn("Tata Consultancy Services is at 2,156.00 rupees, up 3.9 percent", self.ask("TCS share price?"))
+
+    def test_invalid_market_requests_are_refused_before_sending(self):
+        fetch = FakeFetch()
+        for request in (LookupRequest("market", symbols=("my salary",)), LookupRequest("market", fund_codes=("12ab",)),
+                        LookupRequest("market")):
+            with self.assertRaises(LookupUnavailable):
+                OnlineGateway(fetch=fetch).lookup(request)
+        self.assertEqual(fetch.sent, [])
+
+    def test_stale_prices_are_reused_and_labelled(self):
+        now = [1_800_000_000.0]
+        fetch = FakeFetch()
+        gateway = OnlineGateway(fetch=fetch, clock=lambda: now[0])
+        request, focus = self.portfolio.request("how is Infosys doing?")
+        gateway.lookup(request)
+        now[0] += 3600  # the cache has expired, and now the network is down
+        fetch.fail = True
+        reply = self.portfolio.answer(gateway.lookup(request), focus)
+        self.assertIn("I couldn't refresh them.", reply)
+        self.assertIn("Infosys is at 1,023.40 rupees", reply)
+
+    def test_assistant_answers_without_the_model(self):
+        llm = FakeLLM()
+        assistant, indicator, _ = make_assistant(llm=llm, portfolio=self.portfolio)
+        reply, out = quietly(assistant.respond, "how is Infosys doing?")
+        self.assertIn("Computed on this device: Your 10 Infosys shares", reply)
+        self.assertEqual(llm.calls, [])
+        self.assertIn("[ONLINE] sent only symbols=['INFY.NS', '^NSEI', '^BSESN']", out)
+        self.assertIn(IndicatorState.ONLINE, indicator.states)
+
+    def test_switched_off_market_is_answered_from_records(self):
+        llm = FakeLLM("From your records, your Infosys shares were worth 18,800 rupees.")
+        fetch = FakeFetch()
+        gateway = OnlineGateway(fetch=fetch, kinds=("weather", "news"))
+        assistant, _, _ = make_assistant(llm=llm, gateway=gateway, portfolio=self.portfolio)
+        quietly(assistant.respond, "how is my monthly income doing today?")
+        quietly(assistant.respond, "how is Infosys doing?")
+        self.assertEqual(fetch.sent, [])
+
+    def test_unreachable_market_falls_back_to_records_with_a_warning(self):
+        assistant, _, _ = make_assistant(
+            llm=FakeLLM("Your monthly income is 85000."),
+            gateway=OnlineGateway(fetch=FakeFetch(fail=True)),
+            portfolio=self.portfolio,
+        )
+        reply, _ = quietly(assistant.respond, "how is my monthly income and my investments doing today?")
+        self.assertTrue(reply.startswith("I couldn't get live prices, so this is from your saved records"))
+
+
+class NewsTests(unittest.TestCase):
+    def test_topic_is_matched_locally_and_never_sent(self):
+        fetch = FakeFetch()
+        OnlineGateway(fetch=fetch).lookup(news_request("any news about TCS?").request)
+        self.assertNotIn("TCS", fetch.sent_text())
+        self.assertTrue(all(params == {} for _, params in fetch.sent))
+        assistant, _, _ = make_assistant(gateway=OnlineGateway(fetch=FakeFetch()))
+        reply, out = quietly(assistant.respond, "any news about TCS?")
+        self.assertIn("the latest headlines about TCS. One: TCS builds higher bench.", reply)
+        self.assertNotIn("Coal", reply)
+        self.assertIn("(topic not sent)", out)
+
+    def test_every_topic_word_must_match(self):
+        assistant, _, _ = make_assistant(gateway=OnlineGateway(fetch=FakeFetch()))
+        reply, _ = quietly(assistant.respond, "news about my favourite cricket team")
+        self.assertTrue(reply.startswith("I found no headlines about cricket team"))
+
+    def test_general_and_feed_specific_news(self):
+        self.assertEqual(news_request("what is the news today").request.feeds, ("india", "world"))
+        business = news_request("latest business news")
+        self.assertEqual((business.request.feeds, business.label), (("business",), "business"))
+        assistant, _, _ = make_assistant(gateway=OnlineGateway(fetch=FakeFetch()))
+        reply, _ = quietly(assistant.respond, "latest business news")
+        self.assertTrue(reply.startswith("From The Hindu, online: the latest business headlines. One: Coal supplies rise 36%."))
+
+    def test_only_built_in_feeds_and_switch(self):
+        with self.assertRaises(LookupUnavailable):
+            OnlineGateway(fetch=FakeFetch()).lookup(LookupRequest("news", feeds=("https://example.com/rss",)))
+        assistant, _, _ = make_assistant(gateway=OnlineGateway(fetch=FakeFetch(), kinds=("weather", "market")))
+        reply, _ = quietly(assistant.respond, "latest news")
+        self.assertIn("Online news lookups are switched off.", reply)
 
 
 class CommandRecordingTests(unittest.TestCase):

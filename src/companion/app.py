@@ -5,6 +5,7 @@ import time
 
 from .brain.knowledge import KnowledgeBase, load_knowledge
 from .brain.llm import LocalLLM
+from .brain.market import Portfolio
 from .brain.memory import ConversationMemory
 from .brain.wake import WakePhrase
 from .config import IS_RASPBERRY_PI, AppConfig
@@ -79,15 +80,20 @@ def main(argv: list[str] | None = None) -> None:
         )
 
     speaker = PrintSpeaker() if args.text or args.no_tts or not config.tts_enabled else make_speaker()
+    records = load_knowledge(config.knowledge.path)
+    knowledge = KnowledgeBase(
+        records,
+        primary_user=config.knowledge.primary_user,
+        top_k=config.knowledge.top_k,
+        currency=config.knowledge.currency,
+    )
+    gateway = OnlineGateway(enabled=config.online_lookups_enabled and not args.offline, kinds=config.online_kinds)
+    print(f"Online lookups: {', '.join(sorted(gateway.kinds)) or 'off'}")
     assistant = Assistant(
         llm=llm,
-        knowledge=KnowledgeBase(
-            load_knowledge(config.knowledge.path),
-            primary_user=config.knowledge.primary_user,
-            top_k=config.knowledge.top_k,
-            currency=config.knowledge.currency,
-        ),
-        gateway=OnlineGateway(enabled=config.online_lookups_enabled and not args.offline),
+        knowledge=knowledge,
+        gateway=gateway,
+        portfolio=Portfolio.load(records, knowledge.primary_user, config.market_symbols_file),
         indicator=indicator,
         speaker=speaker,
         default_place=config.default_place,
