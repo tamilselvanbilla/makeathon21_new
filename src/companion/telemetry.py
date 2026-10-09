@@ -1,12 +1,11 @@
 """Privacy-aware timing and operational logs for the voice assistant."""
 
 import json
-import os
 import time
-from pathlib import Path
 from typing import Any
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+from .config import PROJECT_ROOT
+
 LOG_DIR = PROJECT_ROOT / "logs"
 LOG_PATH = LOG_DIR / "assistant.log"
 

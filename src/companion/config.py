@@ -1,0 +1,131 @@
+"""Environment-based configuration with defaults tuned for a Raspberry Pi 4.
+
+Every value can be overridden with an environment variable so models can be
+swapped without code changes. When the device is detected as a Raspberry Pi,
+cheaper speech-to-text settings are chosen because the Pi 4's four Cortex-A72
+cores are shared by wake-word detection, STT, and the LLM.
+"""
+
+import os
+from dataclasses import dataclass
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def _detect_raspberry_pi() -> bool:
+    try:
+        model = Path("/proc/device-tree/model").read_text(errors="ignore")
+    except OSError:
+        return False
+    return "raspberry pi" in model.casefold()
+
+
+IS_RASPBERRY_PI = _detect_raspberry_pi()
+CPU_COUNT = os.cpu_count() or 4
+
+
+def _env_int(name: str, default: int) -> int:
+    return int(os.getenv(name, str(default)))
+
+
+def _env_float(name: str, default: float) -> float:
+    return float(os.getenv(name, str(default)))
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    return os.getenv(name, "1" if default else "0").strip().casefold() in {"1", "true", "yes", "on"}
+
+
+@dataclass(frozen=True)
+class LLMConfig:
+    name: str
+    path: Path
+    chat_format: str
+    context: int
+    threads: int
+    batch: int
+    max_tokens: int
+    temperature: float
+
+    @classmethod
+    def from_env(cls) -> "LLMConfig":
+        return cls(
+            name=os.getenv("LLM_MODEL", "Qwen3-0.6B-Q4_K_M"),
+            path=Path(
+                os.getenv(
+                    "LLM_MODEL_PATH",
+                    str(PROJECT_ROOT / "models" / "llm" / "Qwen3-0.6B-Q4_K_M.gguf"),
+                )
+            ),
+            # Qwen uses ChatML. Set LLM_CHAT_FORMAT (e.g. "llama-3", "gemma")
+            # when swapping in a different model family.
+            chat_format=os.getenv("LLM_CHAT_FORMAT", "chatml"),
+            # 2048 tokens of KV cache is ~230 MB for Qwen3-0.6B; fits a 4 GB Pi.
+            context=_env_int("LLM_CONTEXT", 2048),
+            threads=_env_int("LLM_THREADS", CPU_COUNT),
+            batch=_env_int("LLM_BATCH", 256),
+            # ~8-10 tokens/s on a Pi 4, so 128 tokens caps replies at ~15 s.
+            max_tokens=_env_int("LLM_MAX_TOKENS", 128),
+            temperature=_env_float("LLM_TEMPERATURE", 0.2),
+        )
+
+
+@dataclass(frozen=True)
+class STTConfig:
+    model_size: str
+    language: str
+    beam_size: int
+    threads: int
+
+    @classmethod
+    def from_env(cls) -> "STTConfig":
+        return cls(
+            # English-only models are faster and more accurate for English.
+            model_size=os.getenv("WHISPER_MODEL_SIZE", "tiny.en" if IS_RASPBERRY_PI else "base.en"),
+            language=os.getenv("WHISPER_LANGUAGE", "en"),
+            # Greedy decoding is ~3x faster than beam 5 on a Pi 4.
+            beam_size=_env_int("WHISPER_BEAM_SIZE", 1 if IS_RASPBERRY_PI else 5),
+            threads=_env_int("WHISPER_THREADS", CPU_COUNT),
+        )
+
+
+@dataclass(frozen=True)
+class CaptureConfig:
+    device: int | None
+    sample_rate: int
+    max_record_seconds: float
+    max_wait_for_speech_seconds: float
+    silence_seconds: float
+    speech_rms_threshold: float
+
+    @classmethod
+    def from_env(cls) -> "CaptureConfig":
+        device = os.getenv("MIC_DEVICE")
+        return cls(
+            device=int(device) if device else None,
+            sample_rate=16_000,
+            max_record_seconds=_env_float("MAX_RECORD_SECONDS", 15),
+            max_wait_for_speech_seconds=_env_float("MAX_WAIT_FOR_SPEECH_SECONDS", 30),
+            silence_seconds=_env_float("SILENCE_SECONDS", 0.8),
+            speech_rms_threshold=_env_float("SPEECH_RMS_THRESHOLD", 450),
+        )
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    llm: LLMConfig
+    stt: STTConfig
+    capture: CaptureConfig
+    online_lookups_enabled: bool
+    tts_enabled: bool
+
+    @classmethod
+    def from_env(cls) -> "AppConfig":
+        return cls(
+            llm=LLMConfig.from_env(),
+            stt=STTConfig.from_env(),
+            capture=CaptureConfig.from_env(),
+            online_lookups_enabled=_env_bool("ONLINE_LOOKUPS", True),
+            tts_enabled=_env_bool("TTS_ENABLED", True),
+        )

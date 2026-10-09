@@ -1,11 +1,24 @@
-# Recommended runtime: Faster-Whisper + microphone input + local Qwen GGUF
-faster-whisper==1.2.1
-av<19
-numpy
-scipy
-sounddevice
-pyttsx3
-llama-cpp-python
+# Runtime dependencies. Target: Raspberry Pi 4 (4 GB), 64-bit Raspberry Pi OS,
+# Python 3.11 (Bookworm) or 3.13 (Trixie). Every package below has prebuilt
+# aarch64 wheels, so nothing is compiled on the Pi.
+#
+# Ranges (not exact pins) where Bookworm and Trixie need different builds:
+# current numpy/scipy require Python >= 3.12, so pip picks older compatible
+# releases on Python 3.11.
 
-# The local Qwen model is stored under models/llm/ and is not committed.
-# tools/llama.cpp is not required by the main voice assistant.
+# Speech-to-text (pulls in ctranslate2, onnxruntime, tokenizers, huggingface_hub)
+faster-whisper==1.2.1
+av>=11,<19
+
+# Local LLM runtime. PyPI only ships source, so on Linux aarch64 setup.sh
+# installs the prebuilt, checksum-verified wheel for this exact version first
+# (baseline ARMv8 NEON; safe on the Pi 4's Cortex-A72). Elsewhere it compiles.
+llama-cpp-python==0.3.35
+
+# Audio capture and signal processing
+numpy>=1.26,<3
+scipy>=1.11,<2
+sounddevice>=0.5,<0.6
+
+# Spoken output; 2.99+ loads espeak-ng (libespeak-ng1) on Linux
+pyttsx3>=2.99,<3

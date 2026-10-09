@@ -1,0 +1,44 @@
+"""Local speech-to-text with faster-whisper (int8 on CPU)."""
+
+import sys
+
+import numpy as np
+
+from ..config import STTConfig
+from ..telemetry import timed_event
+
+
+class Transcriber:
+    def __init__(self, config: STTConfig):
+        from faster_whisper import WhisperModel
+
+        self.config = config
+        self._model = WhisperModel(
+            config.model_size,
+            device="cpu",
+            compute_type="int8",
+            cpu_threads=config.threads,
+        )
+
+    def transcribe(self, audio: "np.ndarray | str") -> str:
+        """Transcribe a 16 kHz float32 waveform or an audio file path."""
+        if isinstance(audio, np.ndarray) and audio.size == 0:
+            return ""
+        with timed_event("stt", model=self.config.model_size):
+            segments, _ = self._model.transcribe(
+                audio,
+                beam_size=self.config.beam_size,
+                language=self.config.language,
+                vad_filter=True,
+            )
+            return " ".join(segment.text.strip() for segment in segments).strip()
+
+
+if __name__ == "__main__":
+    # Usage: python -m companion.audio.stt [audio/test.wav]  (run from src/)
+    from ..config import PROJECT_ROOT
+
+    path = sys.argv[1] if len(sys.argv) > 1 else str(PROJECT_ROOT / "audio" / "test.wav")
+    config = STTConfig.from_env()
+    print(f"Loading Whisper '{config.model_size}'...")
+    print("Transcription:", Transcriber(config).transcribe(path))
