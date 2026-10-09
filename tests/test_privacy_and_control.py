@@ -1,4 +1,7 @@
 import ast
+import contextlib
+import io
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -14,6 +17,7 @@ from companion.brain.llm import clean_model_response  # noqa: E402
 from companion.brain.router import Intent, route  # noqa: E402
 from companion.device.indicator import ConsoleIndicator, IndicatorState  # noqa: E402
 from companion.device.mute import SoftwareMuteSwitch  # noqa: E402
+from companion.device.tts import EspeakSpeaker  # noqa: E402
 from companion.online_gateway import LookupUnavailable, OnlineGateway  # noqa: E402
 from companion.pipeline import Assistant, MicInput  # noqa: E402
 
@@ -216,6 +220,34 @@ class MuteAndIndicatorTests(unittest.TestCase):
         indicator.show(IndicatorState.IDLE)
         indicator.show(IndicatorState.LISTENING)
         self.assertEqual(lines, ["[LED] IDLE", "[LED] LISTENING"])
+
+
+class SpeechOutputTests(unittest.TestCase):
+    def test_espeak_renders_wav_then_plays_through_alsa_device(self):
+        calls = []
+
+        def fake_run(command, **kwargs):
+            calls.append((command, kwargs["input"]))
+            return subprocess.CompletedProcess(command, 0, stdout=b"RIFF-wav", stderr=b"")
+
+        speaker = EspeakSpeaker(device="plughw:CARD=Headphones", run=fake_run)
+        with contextlib.redirect_stdout(io.StringIO()):
+            speaker.say("-v is not an option here")
+        (synth, synth_input), (play, play_input) = calls
+        self.assertEqual(synth[:3], ["espeak-ng", "--stdin", "--stdout"])
+        self.assertEqual(synth_input, b"-v is not an option here")
+        self.assertEqual(play, ["aplay", "-q", "-D", "plughw:CARD=Headphones"])
+        self.assertEqual(play_input, b"RIFF-wav")
+
+    def test_playback_failure_is_reported_not_raised(self):
+        def failing_run(command, **kwargs):
+            raise subprocess.CalledProcessError(1, command, stderr=b"audio open error: Unknown error 524")
+
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            EspeakSpeaker(run=failing_run).say("hello")
+        self.assertIn("Unknown error 524", out.getvalue())
+        self.assertIn("AUDIO_OUTPUT_DEVICE", out.getvalue())
 
 
 if __name__ == "__main__":

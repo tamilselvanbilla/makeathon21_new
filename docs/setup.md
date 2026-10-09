@@ -182,11 +182,28 @@ cd src && HF_HUB_OFFLINE=1 ../.venv/bin/python -m companion.audio.stt ../audio/t
 
 Expected: `Transcription: <what you said>`.
 
-### 4.5 Speaker
+### 4.5 Speaker (3.5 mm aux)
+
+On Linux the companion renders speech with `espeak-ng` and plays it with `aplay`
+straight to an ALSA device. It does not use espeak-ng's own playback, which needs a
+desktop sound server and fails on Pi OS Lite or over SSH with
+`audio open error: Unknown error 524`.
 
 ```bash
-espeak-ng "Hello from the companion"       # Linux
+scripts/run.sh --list-speakers                 # find the output device
+amixer -c Headphones sset PCM 90%              # raise the jack's volume (often low)
+AUDIO_OUTPUT_DEVICE=plughw:CARD=Headphones scripts/run.sh --speaker-test
 ```
+
+On a Pi 4, the 3.5 mm jack is the card named `Headphones`. If you hear nothing with
+`default`, the audio is probably going to HDMI; set the device explicitly and keep it:
+
+```bash
+echo 'export AUDIO_OUTPUT_DEVICE=plughw:CARD=Headphones' >> ~/.bashrc
+```
+
+Use `plughw:` rather than `hw:` so ALSA converts espeak-ng's 22 kHz mono output to
+whatever the card needs.
 
 ---
 
@@ -342,7 +359,9 @@ not recommended.
 | It never starts recording | Your mic is quiet: lower `SPEECH_RMS_THRESHOLD` (e.g. `200`) |
 | Every recording runs the full 15 s | Background noise never drops below the threshold: raise `SPEECH_RMS_THRESHOLD` (e.g. `800`) |
 | `microphone input overflowed` warnings | The CPU is overloaded: close other programs, check `vcgencmd get_throttled` |
-| No spoken reply | Test `espeak-ng "test"`; check volume with `alsamixer`; or run with `--no-tts` |
+| `audio open error: Unknown error 524` | espeak-ng's own playback found no sound server. Update to this version (it plays through `aplay` instead) and set `AUDIO_OUTPUT_DEVICE=plughw:CARD=Headphones` for the 3.5 mm jack (section 4.5) |
+| `Speech output failed: aplay: ... No such file or directory` / `Device or resource busy` | Wrong device name, or a desktop sound server holds the card: check `scripts/run.sh --list-speakers`; on Pi OS Desktop use `AUDIO_OUTPUT_DEVICE=default` |
+| No spoken reply, no error | Audio is going to HDMI or is muted: set `AUDIO_OUTPUT_DEVICE` (section 4.5) and raise volume with `alsamixer` |
 | Replies are slow | Use `WHISPER_MODEL_SIZE=tiny.en`, lower `LLM_MAX_TOKENS`, check cooling |
 | "I don't have any loans" although the data has a loan | Known limitation: retrieval matches whole words only ("loans" ≠ "loan"). Rephrase ("loan details"); stemmed search is on the roadmap |
 

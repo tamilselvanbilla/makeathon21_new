@@ -60,7 +60,9 @@ the device's native rate and resampled.
 | `TTS_ENABLED` | `1` | `0` prints replies instead of speaking (same as `--no-tts`) |
 | `TTS_RATE` | `150` | Words per minute |
 | `TTS_VOLUME` | `1.0` | 0.0 to 1.0 |
-| `TTS_VOICE` | *(system default)* | pyttsx3 voice id |
+| `TTS_VOICE` | *(system default)* | Voice name, e.g. `en-us` or `en-gb` for espeak-ng (`espeak-ng --voices=en` lists them); a voice id for pyttsx3 |
+| `TTS_ENGINE` | `auto` | `auto` uses espeak-ng + aplay when both are installed (Linux/Pi), otherwise pyttsx3 (macOS/Windows). Force with `espeak` or `pyttsx3` |
+| `AUDIO_OUTPUT_DEVICE` | `default` | ALSA device for `aplay`. Pi 4 3.5 mm jack: `plughw:CARD=Headphones`. List with `scripts/run.sh --list-speakers` |
 
 ## Online lookups
 

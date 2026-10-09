@@ -8,7 +8,7 @@ from .brain.llm import LocalLLM
 from .config import IS_RASPBERRY_PI, AppConfig
 from .device.indicator import ConsoleIndicator
 from .device.mute import SoftwareMuteSwitch
-from .device.tts import PrintSpeaker, Pyttsx3Speaker
+from .device.tts import PrintSpeaker, make_speaker
 from .online_gateway import OnlineGateway
 from .pipeline import Assistant, MicInput, TextInput
 from .telemetry import log_event
@@ -44,7 +44,7 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Loading Whisper '{config.stt.model_size}' (beam {config.stt.beam_size})...")
         source = MicInput(capture, Transcriber(config.stt), SoftwareMuteSwitch(), indicator)
 
-    speaker = PrintSpeaker() if args.text or args.no_tts or not config.tts_enabled else Pyttsx3Speaker()
+    speaker = PrintSpeaker() if args.text or args.no_tts or not config.tts_enabled else make_speaker()
     assistant = Assistant(
         llm=llm,
         records=load_knowledge(),

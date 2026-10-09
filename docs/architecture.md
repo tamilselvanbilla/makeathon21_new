@@ -97,7 +97,7 @@ continues, so an always-on device does not die on one bad request.
 | `companion/brain/knowledge.py` | Loads and searches personal records | `load_knowledge`, `find_relevant_records` |
 | `companion/device/indicator.py` | Listening-light states | `IndicatorState`, `Indicator`, `ConsoleIndicator` |
 | `companion/device/mute.py` | Mute switch | `MuteSwitch`, `SoftwareMuteSwitch` |
-| `companion/device/tts.py` | Spoken output | `Speaker`, `Pyttsx3Speaker`, `PrintSpeaker` |
+| `companion/device/tts.py` | Spoken output: espeak-ng + aplay on Linux (no sound server needed), pyttsx3 elsewhere | `Speaker`, `EspeakSpeaker`, `Pyttsx3Speaker`, `PrintSpeaker`, `make_speaker` |
 | `companion/online_gateway.py` | The only network exit | `OnlineGateway`, `LookupResult`, `LookupUnavailable` |
 | `companion/telemetry.py` | JSON timing log without content | `log_event`, `timed_event` |
 
@@ -173,7 +173,7 @@ models, only configuration changes are needed (see [configuration.md](configurat
 | Keyword retrieval misses plurals and synonyms ("loans" vs "loan") | SQLite FTS5 with stemming |
 | Fallback check flags any answer containing "can't" | Fall back on signals (empty retrieval, out-of-scope intent) instead of keywords |
 | Router is keyword-based | Grammar-constrained LLM intent output |
-| pyttsx3/espeak voice is robotic | Piper TTS |
+| espeak-ng voice is robotic | Piper TTS (same aplay output path) |
 
 ## Testing
 
