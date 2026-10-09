@@ -5,14 +5,17 @@ import re
 from pathlib import Path
 from typing import Any
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+from ..config import PROJECT_ROOT
+
 KNOWLEDGE_DIR = PROJECT_ROOT / "knowledge_base"
 KNOWLEDGE_FILE = KNOWLEDGE_DIR / "personal_data.json"
 
+Records = dict[str, list[dict[str, Any]]]
 
-def load_knowledge() -> dict[str, list[dict[str, Any]]]:
+
+def load_knowledge(path: Path = KNOWLEDGE_FILE) -> Records:
     """Read the configured knowledge base and return typed records."""
-    with KNOWLEDGE_FILE.open(encoding="utf-8") as source:
+    with path.open(encoding="utf-8") as source:
         records = json.load(source)
 
     return {
@@ -43,7 +46,7 @@ def _format_record(entry: dict[str, Any]) -> str:
     return " ".join(parts)
 
 
-def find_relevant_records(question: str, records: dict[str, list[dict[str, Any]]]) -> str:
+def find_relevant_records(question: str, records: Records) -> str:
     """Return only compact records that contain meaningful question matches."""
     question_terms = {
         term.casefold()
