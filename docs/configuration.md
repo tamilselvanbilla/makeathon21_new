@@ -105,6 +105,28 @@ switch. By voice it never shuts down; `Ctrl+C` stops the program.
 | `MEMORY_RETENTION_DAYS` | `30` | Older entries are deleted at startup |
 | `FOLLOW_UP_MINUTES` | `10` | How recent the previous question must be for "and my wife's?" to build on it |
 | `MEMORY_TOP_K` | `3` | Remembered items given to the model per question |
+| `MEMORY_EMBEDDINGS` | `1` | `0` uses keyword search only (no embedding model loaded, ~90 MB less RAM) |
+| `EMBEDDING_MODEL` | `minilm-int8` | `minilm-int8`, `minilm` or `bge-small` (see *Choosing the embedding model*) |
+| `EMBEDDING_DIR` | `models/embedding` | Folder with the embedding models |
+| `MEMORY_MIN_SIMILARITY` | `0.35` | Cosine similarity a note needs to match by meaning alone. Lower finds more paraphrases but more wrong notes |
+
+### Choosing the embedding model
+
+Measured with `scripts/eval_memory_retrieval.py` on 15 notes, 34 questions that should
+find a note and 13 that must not (on a laptop, 2 threads):
+
+| Method | Finds | Rejects | Download | RAM | Per question |
+|---|---|---|---|---|---|
+| Keywords only (`MEMORY_EMBEDDINGS=0`) | 79% | 62% | — | — | <1 ms |
+| **Keywords + `minilm-int8` (default)** | **94%** | 62% | 23 MB | ~90 MB | ~1 ms |
+| Keywords + `minilm` | 94% | 62% | 90 MB | ~185 MB | ~2 ms |
+| Keywords + `bge-small` (threshold 0.65) | 79% | 85% | 133 MB | ~230 MB | ~7 ms |
+
+`bge-small` rejects near-misses better only in a narrow threshold band (0.60 → 54%,
+0.65 → 85%), at 2.5× the RAM. No method reliably rejects near-misses ("wife's
+birthday" when only mom's is stored), so those answers are hedged instead. To compare
+models on your device, download `minilm` or `bge-small` into `models/embedding/` and run
+`.venv/bin/python scripts/eval_memory_retrieval.py --models minilm-int8 bge-small`.
 
 Voice commands:
 

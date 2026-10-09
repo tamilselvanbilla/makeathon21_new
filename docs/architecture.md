@@ -138,7 +138,32 @@ which a 0.6B model follows more reliably than rules.
 ## Conversation memory
 
 `ConversationMemory` keeps text (never audio) in an FTS5 table in
-`data/memory.sqlite3`, one row per note or exchange, with a timestamp.
+`data/memory.sqlite3`, one row per note or exchange, with a timestamp, and one
+embedding per row in a `vectors` table of the same file.
+
+**Hybrid search.** A stored item matches if it contains **every** meaningful word of
+the question (stemmed, with synonyms; marked `exact`), or if its embedding's cosine
+similarity is at least `MEMORY_MIN_SIMILARITY` (0.35). Exact matches rank first, then
+by similarity. Embeddings come from all-MiniLM-L6-v2 int8 run on onnxruntime
+(`brain/embeddings.py`, no extra packages); similarities are a NumPy dot product over
+the stored vectors, which takes well under a millisecond for hundreds of memories, so no
+vector database or SQLite extension is needed. Rows stored before embeddings were
+enabled are embedded at startup; vectors are deleted with their rows.
+
+**Why hybrid and not embeddings or GraphRAG alone:** measured in
+`scripts/eval_memory_retrieval.py` (see configuration.md, *Choosing the embedding
+model*), embeddings lift paraphrase recall from 79% to 94%, but no method separates
+near-misses ("wife's birthday" vs a note about mom's) because they *are* semantically
+similar. Keyword coverage tells the two apart cheaply, so it decides how confident the
+answer sounds. GraphRAG would need the 0.6B model to extract entities reliably and
+targets cross-document summaries, not lookups; the data's structure (owner → record
+type → fields) already gives the graph that matters.
+
+**Honest answers.** A note found only by meaning is answered with a hedge: "I'm not
+certain, but the closest thing I remember is: on 9 October you told me that mom's
+birthday is on 12 March." The note is quoted, never paraphrased by the model, so a
+near-miss is visible rather than invented. In the benchmark, all wrong matches were
+hedged.
 
 | Memory | Stored when | Used when |
 |---|---|---|
@@ -202,7 +227,7 @@ stateDiagram-v2
 | Models loaded once at startup | Loading takes seconds; per-request loading would dominate latency |
 | Stages run sequentially | STT and LLM each get all four cores instead of competing |
 | Lazy imports | Text mode and tests run without audio libraries; startup loads only what is used |
-| Memory in SQLite FTS5, top 3 items | No embedding model in RAM; search is instant; only relevant items reach the prompt |
+| Memory: FTS5 + int8 MiniLM embeddings, NumPy similarity, top 3 items | ~90 MB RAM and ~1 ms per question for 94% vs 79% paraphrase recall; no vector database; only relevant items reach the prompt |
 | Wake phrase via Whisper, first 3 s only | No extra model in RAM; room conversation costs one short `tiny.en` pass per utterance instead of a full transcription |
 
 ## Extension points
@@ -256,6 +281,8 @@ models, only configuration changes are needed (see [configuration.md](configurat
 | Only weather is available online; news and search are refused | News provider (RSS) behind the same gateway |
 | The 0.6B model's one-line weather advice can misjudge probabilities (e.g. "likely to rain" at 14%) | The facts are always read out verbatim first; a larger model or rule-based advice |
 | Fallback check flags any answer containing "can't" | Fall back on signals (empty retrieval, out-of-scope intent) instead of keywords |
+| Memory can't reject near-misses ("wife's birthday" vs mom's) | They are answered with a hedge and the note quoted verbatim |
+| Some paraphrases fall just below the similarity threshold ("power tool" → drill scores 0.31 with the int8 model) | Lower `MEMORY_MIN_SIMILARITY`, at the cost of more hedged near-misses; or a larger embedding model |
 | Router is keyword-based | Grammar-constrained LLM intent output |
 | espeak-ng voice is robotic | Piper TTS (same aplay output path) |
 

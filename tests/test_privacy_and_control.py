@@ -16,7 +16,12 @@ sys.path.insert(0, str(SRC))
 
 from companion.brain import policy  # noqa: E402
 from companion.brain.knowledge import KnowledgeBase  # noqa: E402
-from companion.brain.memory import ConversationMemory, MemoryCommand, parse_memory_command  # noqa: E402
+from companion.brain.memory import (  # noqa: E402
+    ConversationMemory,
+    MemoryCommand,
+    note_answer,
+    parse_memory_command,
+)
 from companion.brain.prompts import NOT_IN_RECORDS_ANSWER  # noqa: E402
 from companion.brain.llm import clean_model_response  # noqa: E402
 from companion.audio.capture import record_command  # noqa: E402
@@ -491,6 +496,77 @@ class MemoryTests(unittest.TestCase):
             self.assertIn("B2", ConversationMemory(path, clock=self.clock).context_for("where did I park"))
             self.clock.advance(days=31)
             self.assertEqual(ConversationMemory(path, clock=self.clock).context_for("where did I park"), "")
+
+
+class ConceptEmbedder:
+    """Deterministic stand-in for a sentence-embedding model: one dimension per concept."""
+
+    CONCEPTS = [
+        ("drill", "power tool"),
+        ("umbrella", "brolly"),
+        ("birthday", "wish"),
+        ("parked", "park", "car", "level"),
+        ("passport", "travel documents"),
+    ]
+
+    def __init__(self):
+        self.calls = 0
+
+    def embed(self, texts, query=False):
+        self.calls += 1
+        vectors = []
+        for text in texts:
+            lowered = text.casefold()
+            vec = np.array([1.0 if any(w in lowered for w in words) else 0.0 for words in self.CONCEPTS] + [0.1])
+            vectors.append(vec / np.linalg.norm(vec))
+        return np.array(vectors, dtype=np.float32)
+
+
+class HybridMemoryTests(unittest.TestCase):
+    def setUp(self):
+        self.clock = Clock()
+        self.memory = ConversationMemory(clock=self.clock, embedder=ConceptEmbedder(), min_similarity=0.5)
+        for note in ("I lent my drill to Ravi", "I left my umbrella in the car", "mom's birthday is on 12 March"):
+            self.memory.add_note(note)
+
+    def test_paraphrase_found_by_meaning_and_marked_inexact(self):
+        hits = self.memory.search("who did I give my power tool to?")
+        self.assertEqual(hits[0].question, "I lent my drill to Ravi")
+        self.assertFalse(hits[0].exact)
+
+    def test_full_keyword_match_is_exact_and_first(self):
+        hits = self.memory.search("who has my drill?")
+        self.assertEqual(hits[0].question, "I lent my drill to Ravi")
+        self.assertTrue(hits[0].exact)
+
+    def test_unrelated_question_finds_nothing(self):
+        self.assertEqual(self.memory.search("what is my bank PIN?"), [])
+
+    def test_near_miss_is_answered_with_a_hedge(self):
+        hit = self.memory.search("when is my wife's birthday?")[0]
+        self.assertFalse(hit.exact)
+        self.assertTrue(note_answer(hit).startswith("I'm not certain, but the closest thing I remember is: on 9 October"))
+        exact = self.memory.search("when is mom's birthday?")[0]
+        self.assertEqual(note_answer(exact), "On 9 October you told me that mom's birthday is on 12 March.")
+
+    def test_vectors_are_deleted_with_their_memories(self):
+        self.memory.forget_last()
+        self.assertEqual(self.memory._db.execute("SELECT count(*) FROM vectors").fetchone()[0], 2)
+        self.memory.forget_all()
+        self.assertEqual(self.memory._db.execute("SELECT count(*) FROM vectors").fetchone()[0], 0)
+
+    def test_existing_memories_are_embedded_when_a_model_is_added(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "memory.sqlite3"
+            ConversationMemory(path, clock=self.clock).add_note("I lent my drill to Ravi")  # keyword-only
+            upgraded = ConversationMemory(path, clock=self.clock, embedder=ConceptEmbedder(), min_similarity=0.5)
+            self.assertEqual(upgraded.search("who has my power tool?")[0].question, "I lent my drill to Ravi")
+
+    def test_keyword_only_mode_still_hedges_partial_matches(self):
+        memory = ConversationMemory(clock=self.clock)
+        memory.add_note("mom's birthday is on 12 March")
+        self.assertFalse(memory.search("when is my wife's birthday?")[0].exact)
+        self.assertTrue(memory.search("when is mom's birthday?")[0].exact)
 
 
 class AssistantMemoryTests(unittest.TestCase):

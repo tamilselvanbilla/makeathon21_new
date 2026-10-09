@@ -138,6 +138,10 @@ class MemoryConfig:
     retention_days: int
     follow_up_minutes: float
     top_k: int
+    embeddings: bool
+    embedding_model: str
+    embedding_dir: Path
+    min_similarity: float
 
     @classmethod
     def from_env(cls) -> "MemoryConfig":
@@ -151,6 +155,12 @@ class MemoryConfig:
             # "And my wife's?" uses the previous question if it was this recent.
             follow_up_minutes=_env_float("FOLLOW_UP_MINUTES", 10),
             top_k=_env_int("MEMORY_TOP_K", 3),
+            # Semantic search finds paraphrases ("power tool" -> drill); see
+            # scripts/eval_memory_retrieval.py for the measurements behind these defaults.
+            embeddings=_env_bool("MEMORY_EMBEDDINGS", True),
+            embedding_model=os.getenv("EMBEDDING_MODEL", "minilm-int8"),
+            embedding_dir=Path(os.getenv("EMBEDDING_DIR", str(PROJECT_ROOT / "models" / "embedding"))),
+            min_similarity=_env_float("MEMORY_MIN_SIMILARITY", 0.35),
         )
 
 

@@ -55,9 +55,10 @@ companion needs about 1.1 GB:
 | LLM KV cache (`LLM_CONTEXT=2048`) | 224 MB |
 | LLM compute buffers | ~150 MB |
 | Whisper `tiny.en` (int8) + runtime | ~225 MB |
+| Memory embedding model (all-MiniLM-L6-v2 int8) | ~90 MB |
 | Python, NumPy, audio | ~100 MB |
 
-Raspberry Pi OS Lite itself uses about 250 MB, leaving over 2 GB free for the
+Raspberry Pi OS Lite itself uses about 250 MB, leaving about 2 GB free for the
 planned Piper TTS voice. Check with `free -h` while the assistant
 is running.
 
@@ -117,6 +118,7 @@ so the time is mostly downloads (about 130 MB of packages and 470 MB of models).
 | Virtual environment | Creates `.venv/` in the project root (reused if present) |
 | Python packages | Installs `requirements.txt` (faster-whisper, llama-cpp-python, sounddevice, numpy, scipy, pyttsx3) |
 | Language model | Downloads `Qwen3-0.6B-Q4_K_M.gguf` (~397 MB) from `huggingface.co/unsloth/Qwen3-0.6B-GGUF` into `models/llm/`, resumes interrupted downloads, and verifies the SHA-256 checksum |
+| Memory embedding model | Downloads all-MiniLM-L6-v2 int8 (`model_qint8_arm64.onnx`, ~23 MB, Apache-2.0) and its tokenizer from a pinned Hugging Face revision into `models/embedding/minilm/`, verifying each SHA-256 |
 | Speech model | Caches the Whisper model: `tiny.en` on a Pi, `base.en` elsewhere |
 | Tests | Runs the unit test suite |
 

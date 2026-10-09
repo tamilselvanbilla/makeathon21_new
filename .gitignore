@@ -12,8 +12,9 @@ __pycache__/
 .cache/
 Qwen/
 models/llm/*.gguf
+models/embedding/
 # Conversation memory (personal, stays on the device)
-data/
+/data/
 audio/*.wav
 *.log
 

@@ -54,6 +54,14 @@ MODEL_SHA256="ac2d97712095a558e31573f62f466a3f9d93990898b0ec79d7c974c1780d524a"
 LLAMA_WHEEL_URL="https://github.com/abetlen/llama-cpp-python/releases/download/v0.3.35/llama_cpp_python-0.3.35-py3-none-manylinux2014_aarch64.manylinux_2_17_aarch64.whl"
 LLAMA_WHEEL_SHA256="b5a4abd4d1d506d6f06b997c21d0532670a3f5350c9e6cfb3e54c33bf1322584"
 
+# Sentence embeddings for memory search, pinned to an exact repository revision.
+EMBEDDING_DIR="$ROOT/models/embedding/minilm"
+EMBEDDING_URL="https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2/resolve/1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
+EMBEDDING_FILES=(
+  "onnx/model_qint8_arm64.onnx=4278337fd0ff3c68bfb6291042cad8ab363e1d9fbc43dcb499fe91c871902474"
+  "tokenizer.json=be50c3628f2bf5bb5e3a7f17b1f74611b2561a3a27eeab05e5aa30f411572037"
+)
+
 SKIP_SYSTEM=0
 SKIP_MODELS=0
 SKIP_TESTS=0
@@ -158,6 +166,12 @@ fi
 if [ "$SKIP_MODELS" = 0 ]; then
   step "Downloading local LLM ($MODEL_FILE, ~400 MB)"
   download_verified "$MODEL_URL" "$MODEL_DIR/$MODEL_FILE" "$MODEL_SHA256"
+
+  step "Downloading memory embedding model (all-MiniLM-L6-v2 int8, ~23 MB, Apache-2.0)"
+  for entry in "${EMBEDDING_FILES[@]}"; do
+    name="${entry%%=*}"
+    download_verified "$EMBEDDING_URL/$name" "$EMBEDDING_DIR/$(basename "$name")" "${entry#*=}"
+  done
 
   step "Caching Whisper speech-to-text model"
   # Uses the same Pi-aware default as the app (tiny.en on a Pi, base.en elsewhere).

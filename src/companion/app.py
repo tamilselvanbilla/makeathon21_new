@@ -25,6 +25,21 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def load_embedder(config: AppConfig):
+    """The memory embedding model, or None for keyword-only memory search."""
+    if not config.memory.embeddings:
+        return None
+    from .brain.embeddings import Embedder
+
+    try:
+        embedder = Embedder(config.memory.embedding_dir, config.memory.embedding_model)
+    except FileNotFoundError as exc:
+        print(f"Memory search: keywords only ({exc})")
+        return None
+    print(f"Memory search: keywords + '{config.memory.embedding_model}' embeddings")
+    return embedder
+
+
 def main(argv: list[str] | None = None) -> None:
     args = parse_args(argv)
     config = AppConfig.from_env()
@@ -81,6 +96,8 @@ def main(argv: list[str] | None = None) -> None:
             retention_days=config.memory.retention_days,
             follow_up_minutes=config.memory.follow_up_minutes,
             top_k=config.memory.top_k,
+            embedder=load_embedder(config),
+            min_similarity=config.memory.min_similarity,
         ),
     )
 
