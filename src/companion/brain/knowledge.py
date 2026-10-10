@@ -8,6 +8,12 @@ When the question names a record type ("passport", "loan", "income"), only
 records of that type are returned. A small model otherwise borrows facts from
 neighbouring records, e.g. answering a passport expiry with an insurance date.
 
+Questions asking for advice ("can I take a loan?", "should I lose weight?") are
+different: no single record answers them, so the model gets every record of the
+relevant category instead, and for money questions a budget computed here, since a
+small model's arithmetic is unreliable. Only that category is sent, never the whole
+file, which would add about a minute of prompt reading per question on a Pi 4.
+
 Records belong to an owner. Unless a question names another person ("my
 wife's income", "Robert's ID"), only the primary user's records and shared
 household records (owners containing "family") are returned, so one person's
@@ -108,6 +114,54 @@ SYNONYMS = {
     "buy": "purchase", "bought": "purchase", "purchased": "purchase", "issued": "issue",
 }
 
+# "Can I take a loan?", "Should I invest more?", "Am I eligible for ...?", "Can I afford ...?"
+ADVICE = re.compile(
+    r"^\W*(?:can|could|should|shall|may|must)\s+(?:i|we)\b|^\W*(?:is it|would it be)\s+(?:ok|okay|safe|wise|good|fine)\b|"
+    r"\b(?:afford|affordable|eligible|eligibility|qualify|advisable|good idea|enough money|manage)\b",
+    re.IGNORECASE,
+)
+# Words that point an advice question at a category when no record matches its words.
+ADVICE_TOPICS = {
+    "financial": frozenset(
+        """loan loans emi borrow lend lender credit mortgage afford affordable buy purchase spend
+        invest investment investments fund funds stock stocks shares bond save saving savings
+        money budget lakh lakhs crore rupees salary income expense expenses car house home flat
+        bike vacation trip holiday wedding retire retirement tax insurance""".split()
+    ),
+    "medical": frozenset(
+        """health healthy weight lose gain diet eat eating food exercise run running walk gym yoga
+        fast fasting sugar alcohol drink smoke sleep medicine medication tablet dose blood pressure
+        bmi heart pulse doctor checkup fit fitness""".split()
+    ),
+}
+ADVICE_MAX_RECORDS = 8
+# Lenders commonly cap all EMIs together at about this share of net income.
+MAX_EMI_SHARE = 0.4
+# Assumed terms for "a loan of 5 lakhs" when the question gives none.
+ASSUMED_LOAN_RATE = 0.10
+ASSUMED_LOAN_YEARS = 5
+LOAN_WORDS = re.compile(r"\b(?:loans?|emis?|borrow|mortgage|afford|affordable|eligible|eligibility|qualify|credit)\b", re.I)
+AMOUNT = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*(lakhs?|lacs?|crores?|k|thousand)?\b", re.I)
+SCALE = {"lakh": 100_000, "lac": 100_000, "crore": 10_000_000, "k": 1_000, "thousand": 1_000}
+
+
+def spoken_amount(text: str) -> tuple[float, bool] | None:
+    """The first amount in the question and whether it is a monthly EMI:
+    "a loan of 5 lakhs" -> (500000, False), "an EMI of 15,000" -> (15000, True)."""
+    match = AMOUNT.search(text)
+    if not match:
+        return None
+    unit = (match.group(2) or "").casefold().rstrip("s")
+    amount = float(match.group(1).replace(",", "")) * SCALE.get(unit, 1)
+    before = text[: match.start()].casefold()
+    is_emi = bool(re.search(r"\b(?:emis?|installments?|per month|a month|monthly)\b", before + text[match.end():match.end() + 12].casefold()))
+    return amount, is_emi
+
+
+def monthly_installment(principal: float, annual_rate: float, years: int) -> float:
+    rate, months = annual_rate / 12, years * 12
+    return principal * rate * (1 + rate) ** months / ((1 + rate) ** months - 1)
+
 Records = dict[str, list[dict[str, Any]]]
 
 
@@ -205,6 +259,7 @@ class KnowledgeBase:
             if isinstance(entry, dict) and entry.get("name") and entry.get("relationship")
             and entry.get("owner") != self.primary_user
         ]
+        self._records = records
         self._db = self._build_index(records)
         # Words naming things (companies, banks, models, places) and their acronyms. In a
         # question they may point at another record ("where did I work before Infosys?"),
@@ -377,12 +432,110 @@ class KnowledgeBase:
                 counts[rowid] += 1
         return counts
 
+    def is_advice(self, question: str) -> bool:
+        return bool(ADVICE.search(question))
+
+    def advice_categories(self, question: str) -> list[str]:
+        """Categories an advice question is about: from its words, or else from the
+        categories of records sharing any of its search terms."""
+        words = set(tokenize(question))
+        words |= {w[:-1] for w in words if w.endswith("s")}
+        found = [category for category, topic in ADVICE_TOPICS.items() if words & topic]
+        if found:
+            return found
+        terms, _ = self._terms(question)
+        if not terms:
+            return []
+        query = " OR ".join(f'"{term}"' for term in terms)
+        rows = self._db.execute(
+            "SELECT DISTINCT category FROM records WHERE records MATCH ?", (f"{{body}} : ({query})",)
+        )
+        return [category for (category,) in rows if category in ADVICE_TOPICS]
+
+    def advice_matches(self, question: str) -> list[Match]:
+        """Every record of the advice question's categories, for the owners it is about."""
+        allowed = self.allowed_owners(question)
+        matches = [
+            Match(category, owner, text)
+            for category in self.advice_categories(question)
+            for (owner, text) in self._db.execute(
+                "SELECT owner, text FROM records WHERE category = ? ORDER BY rowid", (category,)
+            )
+            if owner in allowed
+        ]
+        return matches[:ADVICE_MAX_RECORDS]
+
+    def budget(self, owner: str) -> str:
+        """Monthly figures for money advice, computed here rather than by the model."""
+        financial = [e for e in self._records.get("financial", []) if str(e.get("owner") or self.primary_user) == owner]
+        def total(record_type: str, field: str) -> float | None:
+            values = [e[field] for e in financial if e.get("record_type") == record_type and isinstance(e.get(field), (int, float))]
+            return sum(values) if values else None
+
+        income = total("income", "net_monthly_income") or total("income", "monthly_income")
+        expenses = total("expense", "monthly_total")
+        emis = total("bank_loan", "monthly_installment") or 0
+        if not income or expenses is None:
+            return ""
+        left = income - expenses - emis
+        money = lambda amount: f"{self.currency} {amount:,.0f}"
+        return (
+            f"Monthly budget of {owner}, computed on the device: net income {money(income)}; "
+            f"expenses {money(expenses)}; existing loan EMIs {money(emis)}; "
+            f"left after expenses and EMIs {money(left)}; EMIs are {emis / income:.0%} of net income."
+        )
+
+    def loan_answer(self, question: str) -> str:
+        """The spoken answer to "can I take a loan (of 5 lakhs)?", computed from the records.
+        A 0.6B model given these figures still said a loan it couldn't afford was fine, so
+        the comparison is made here and the model is not used. "" if it doesn't apply."""
+        if not (self.is_advice(question) and LOAN_WORDS.search(question)):
+            return ""
+        owners = self.mentioned_owners(question) or {self.primary_user}
+        owner = sorted(owners)[0]
+        financial = [e for e in self._records.get("financial", []) if str(e.get("owner") or self.primary_user) == owner]
+        pick = lambda kind, field: sum(e[field] for e in financial if e.get("record_type") == kind and isinstance(e.get(field), (int, float)))
+        income = pick("income", "net_monthly_income") or pick("income", "monthly_income")
+        expenses = pick("expense", "monthly_total")
+        emis = pick("bank_loan", "monthly_installment")
+        if not income or not expenses:
+            return ""
+        left = income - expenses - emis
+        room = max(0.0, min(left, MAX_EMI_SHARE * income - emis))
+        money = lambda amount: f"{self.currency} {amount:,.0f}"
+        whose = "your" if owner == self.primary_user else f"{owner}'s"
+        caveat = "The bank decides the final eligibility."
+        asked = spoken_amount(question)
+        if asked:
+            amount, is_emi = asked
+            emi = amount if is_emi else monthly_installment(amount, ASSUMED_LOAN_RATE, ASSUMED_LOAN_YEARS)
+            loan = f"An EMI of {money(emi)}" if is_emi else (
+                f"A loan of {money(amount)} at about {ASSUMED_LOAN_RATE:.0%} over {ASSUMED_LOAN_YEARS} years "
+                f"needs an EMI of about {money(emi)}. That EMI"
+            )
+            if emi <= room:
+                return f"Yes. {loan} fits {whose} budget, which has room for up to {money(room)} a month. {caveat}"
+            return (f"Not comfortably. {loan} is more than the {money(room)} a month {whose} budget has room for, "
+                    f"so it needs lower expenses or a smaller loan. {caveat}")
+        if room <= 0:
+            return (f"Not right now. After expenses and existing EMIs, {money(left)} is left each month, "
+                    f"so there is no room for a new EMI. {caveat}")
+        return (f"Yes, a small one. After expenses and the existing EMI of {money(emis)}, {money(left)} is left "
+                f"each month, so a new EMI of up to {money(room)} fits {whose} budget. {caveat}")
+
     def context_for(self, question: str) -> str:
         """Readable, owner-labelled records for the prompt, or "" when none match."""
         matches = self.search(question)
+        advice = self.advice_matches(question) if self.is_advice(question) else []
+        # Advice adds the whole category to what the question's words found.
+        matches += [match for match in advice if match not in matches][: max(0, ADVICE_MAX_RECORDS - len(matches))]
         if not matches:
             return ""
         lines = [f"{match.category.title()} record of {match.owner}: {match.text}" for match in matches]
+        if advice:
+            # Computed facts first: a small model attends most to the start of the context.
+            owners = dict.fromkeys(m.owner for m in matches if m.category == "financial")
+            lines = [line for line in (self.budget(owner) for owner in owners) if line] + lines
         _, expanded = self._terms(question)
         if expanded:
             # Tell the model how the user's words map to the record fields ("EMI" -> installment).

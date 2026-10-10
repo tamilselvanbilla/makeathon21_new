@@ -218,6 +218,10 @@ class Assistant:
         elif route(effective) is Intent.ONLINE_LOOKUP:
             set_turn(route="weather")
             reply, keep = self._respond_with_lookup(text, effective)
+        elif loan := self.knowledge.loan_answer(effective):
+            set_turn(route="loan_check")
+            print("[LOCAL] loan affordability computed on-device from your records")
+            reply, keep = loan, True
         else:
             reply, keep = self._respond_locally(text, effective, previous)
         set_turn(remembered=keep)
@@ -258,9 +262,12 @@ class Assistant:
             print("[CONTEXT] records sent to the model:\n  " + (knowledge.replace("\n", "\n  ") or "(none)"))
             if remembered:
                 print("[CONTEXT] memory sent to the model:\n  " + remembered.replace("\n", "\n  "))
-        answer = full_sentences(as_second_person(require_local_answer(
+        answer = require_local_answer(
             self.llm.chat(self.system_prompt, build_user_prompt(text, knowledge, remembered, earlier))
-        )))
+        )
+        # The model sometimes starts by repeating the prompt's "Question: <text>" line.
+        answer = re.sub(rf"^Question:\s*{re.escape(text.rstrip('?. '))}\W*", "", answer, flags=re.I) or answer
+        answer = full_sentences(as_second_person(answer))
         # Records store 50000 and the model says 50,000 (the bond's face value), so commas are ignored.
         if EXAMPLE_FIGURE in answer and EXAMPLE_FIGURE.replace(",", "") not in f"{knowledge} {remembered} {earlier}".replace(",", ""):
             set_turn(guard="example_figure", model_answer=answer)

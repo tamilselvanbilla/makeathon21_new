@@ -34,7 +34,7 @@ flowchart LR
         TTS --> Spk[Speaker]
         LED[Indicator / LED]
     end
-    GW <-->|Open-Meteo only,<br/>place name + day| Net[(Internet)]
+    GW <-->|weather, market, news:<br/>public identifiers only| Net[(Internet)]
 ```
 
 The indicator is updated at each stage:
@@ -79,13 +79,17 @@ stateDiagram-v2
    question. `KnowledgeBase.search` finds personal records and `ConversationMemory.search`
    finds notes and, for recall questions, past exchanges (details below). An answer
    that comes only from a note is given directly from it. If the question is personal
-   and nothing matches anywhere, the assistant answers "I couldn't find that in your
-   personal records" without calling the model.
+   and nothing matches anywhere, the assistant answers "No matched data found." without
+   calling the model. A follow-up that names its own recorded topic ("what about my EMI
+   amount?") is answered by itself instead of being joined to the previous question.
 7. **Reason locally.** `LocalLLM.chat` answers from the system prompt, question,
    owner-labelled records, and any online facts.
 8. **Check.** `require_local_answer` replaces an empty answer with an honest
    fallback message. Uncertain answers ("not recorded…") are spoken in the model's own
-   words but not remembered as facts.
+   words but not remembered as facts. Answers that copy the prompt's example figure or
+   promise to remember something are replaced; "I am 175 cm tall" becomes "You are …";
+   an unfinished last sentence is dropped. Every reply is then cut to `MAX_REPLY_WORDS`
+   (50) words at the last full sentence (`policy.limit_words`).
 9. **Speak.** The `Speaker` says the reply; the indicator returns to `IDLE`.
 
 Any exception during steps 4–8 is logged, the user hears an apology, and the loop
@@ -103,8 +107,8 @@ continues, so an always-on device does not die on one bad request.
 | `companion/audio/stt.py` | Speech-to-text | `Transcriber` |
 | `companion/brain/llm.py` | Loads the GGUF model once; chat completion; strips `<think>` traces and repeats | `LocalLLM`, `clean_model_response` |
 | `companion/brain/router.py` | Intent decision | `Intent`, `route` |
-| `companion/brain/prompts.py` | System prompt and prompt assembly | `SYSTEM_PROMPT`, `build_user_prompt` |
-| `companion/brain/policy.py` | What may go online; when to fall back | `is_allowed_cloud_lookup`, `require_local_answer` |
+| `companion/brain/prompts.py` | System prompt and prompt assembly; reply word limit | `build_system_prompt`, `build_user_prompt`, `MAX_REPLY_WORDS` |
+| `companion/brain/policy.py` | What may go online; when to fall back; answer clean-up and length limit | `is_allowed_cloud_lookup`, `require_local_answer`, `as_second_person`, `full_sentences`, `limit_words` |
 | `companion/brain/knowledge.py` | Loads personal records and searches them (FTS5, owners, record-type focus) | `load_knowledge`, `KnowledgeBase`, `Match` |
 | `companion/brain/memory.py` | Notes, past exchanges, follow-ups, forgetting; SQLite on the device | `ConversationMemory`, `parse_memory_command`, `MemoryItem` |
 | `companion/device/indicator.py` | Listening-light states | `IndicatorState`, `Indicator`, `ConsoleIndicator` |
@@ -128,14 +132,16 @@ question:
 | Terms | Drops filler words (incl. everyday verbs, adverbs, pronouns: *taking, daily, now, under…*) and adds synonyms from `SYNONYMS` | "EMI" → emi, installment, loan; "medications" → prescription, dosage |
 | Match | Porter-stemmed full-text search, BM25-ranked, over each record's fields (`body`) and its category (`topic`) | "loans" finds "Home Loan"; "my medical records" finds all medical records |
 | Owner filter | "my"/"I" means the primary user (most frequent owner, or `PRIMARY_USER`); other people only when named (relation or name); "family" covers everyone; shared "family" records are always included | "my income" never returns the wife's salary |
-| Coverage | A record is kept only if **it alone** covers every meaningful question word (the word or a synonym). Named things (companies, banks, models, places, and their acronyms) may be covered by any matching record, so they can point at another record | "when does my passport expire" → nothing (no record has both); "where did I work before Infosys" → the TCS job |
+| Coverage | A record is kept only if **it alone** covers every meaningful question word (the word or a synonym). Named things (companies, banks, models, places, and their acronyms) may be covered by any matching record, so they can point at another record | "when does my voter ID expire" → nothing (the voter ID record has no expiry); "where did I work before Infosys" → the TCS job |
 | Category collisions | A word sharing its stem with a category name ("medications" / "medical" → `medic`) is matched through its synonyms only | "my medications" → the prescription, not every medical record |
 | Acronyms | Names of three or more capitalised words are also indexed by their initials | "SBI" → State Bank of India bond; "TCS" → Tata Consultancy Services |
 | Ranking | Records containing a named thing from the question first, then current before "previous …" records (unless the question says before/previous/earlier), then BM25 | "which insurer covers my Hero Splendor" → that bike; "where do I work" → current job |
 | Top-k | Keep at most `KNOWLEDGE_TOP_K` records (default 4) | Short prompts on the Pi |
+| Advice | A question asking for advice (`ADVICE`: "can I…", "should I…", "afford", "eligible") also gets every record of its category, picked by topic words (`ADVICE_TOPICS`), up to `ADVICE_MAX_RECORDS` (8). Money questions get a budget line computed in Python (net income − expenses − EMIs), placed first. Only that category is sent, not the whole file, which would add about a minute of prompt reading on a Pi 4 | "can I take another loan" → income, expenses, investments, loan + "left after expenses and EMIs INR 6,800" |
+| Loan check | Loan and eligibility questions are answered by `loan_answer` without the model: room for a new EMI = min(money left each month, 40% of net income − existing EMIs); an amount in the question ("5 lakhs") is turned into an EMI at an assumed 10% over 5 years and compared. Given the same figures, the 0.6B model still said an unaffordable loan was fine | "can I get a loan of 5 lakhs" → "Not comfortably … EMI of about INR 10,624 … more than the INR 6,800 a month your budget has room for" |
 | Format | One line per record, labelled with category and owner, plus a note mapping synonyms | "Financial record of John's wife: …" |
 
-`tests/data/knowledge_retrieval_eval.json` holds 81 natural spoken questions (including
+`tests/data/knowledge_retrieval_eval.json` holds 104 natural spoken questions (including
 real phrasings like "what are the medications I am taking daily?"), each with the record
 type it must find or `null` if it must find nothing; a unit test requires all of them
 except one documented limitation (see docs/benchmarks.md).

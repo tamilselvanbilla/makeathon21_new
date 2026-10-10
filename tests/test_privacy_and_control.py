@@ -457,6 +457,49 @@ class RetrievalBenchmarkTests(unittest.TestCase):
         self.assertEqual(failures, [])
 
 
+class AdviceTests(unittest.TestCase):
+    """Questions like "can I take a loan?" that no single record answers."""
+
+    def setUp(self):
+        self.kb = KnowledgeBase(load_knowledge())
+
+    def test_advice_question_gets_the_whole_category_and_a_computed_budget(self):
+        context = self.kb.context_for("can I take another loan")
+        self.assertTrue(context.startswith("Monthly budget of John, computed on the device: net income INR 62,000"))
+        self.assertIn("left after expenses and EMIs INR 6,800", context)
+        for kind in ("income", "expense", "bank loan"):
+            self.assertIn(f"Record Type: {kind};", context)
+        self.assertNotIn("Medical record", context)
+
+    def test_health_advice_gets_medical_records(self):
+        context = self.kb.context_for("can I go for a run")
+        self.assertIn("Record Type: vitals;", context)
+        self.assertNotIn("Financial record", context)
+
+    def test_advice_keeps_what_the_words_found(self):
+        self.assertIn("Record Type: vehicle;", self.kb.context_for("should I renew my car insurance"))
+
+    def test_fact_questions_are_unchanged(self):
+        self.assertEqual(self.kb.context_for("what is my emi amount").count("record of"), 1)
+        self.assertEqual(self.kb.loan_answer("what is my emi amount"), "")
+
+    def test_loan_answers_are_computed(self):
+        self.assertIn("a new EMI of up to INR 6,800 fits your budget", self.kb.loan_answer("can I take a bank loan"))
+        five = self.kb.loan_answer("can I get a loan of 5 lakhs")
+        self.assertTrue(five.startswith("Not comfortably."))
+        self.assertIn("EMI of about INR 10,624", five)
+        self.assertTrue(self.kb.loan_answer("can I take a loan of 2 lakhs").startswith("Yes."))
+        self.assertTrue(self.kb.loan_answer("can I afford a car loan with EMI 15000").startswith("Not comfortably."))
+
+    def test_loan_question_is_answered_without_the_model(self):
+        llm = FakeLLM()
+        assistant = Assistant(llm=llm, knowledge=self.kb, gateway=OnlineGateway(enabled=False),
+                              indicator=RecordingIndicator(), speaker=FakeSpeaker())
+        reply, _ = quietly(assistant.respond, "Am I eligible for a home loan?")
+        self.assertIn("INR 6,800", reply)
+        self.assertEqual(llm.calls, [])
+
+
 class MicrophoneSelectionTests(unittest.TestCase):
     MAC = [(0, "MacBook Pro Microphone")]
     PI = [(0, "bcm2835 Headphones: - (hw:0,0)"), (1, "Monitor of Built-in Audio"), (2, "USB PnP Sound Device: Audio (hw:2,0)")]

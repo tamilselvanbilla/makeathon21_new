@@ -4,6 +4,7 @@
       "owner": "John",
       "record_type": "income",
       "monthly_income": 85000,
+      "net_monthly_income": 62000,
       "annual_income": 1020000,
       "income_type": "Salary",
       "employer": "Infosys Ltd.",

@@ -8,9 +8,9 @@ facts (weather, news, search), and the reasoning about those facts still happens
 Built for Makeathon problem statement 4: *Personal, Offline, Always-On AI Companion*.
 
 ```
- Microphone ─► Whisper STT ─► Router ─┬─► Local knowledge ─► Qwen3-0.6B (llama.cpp) ─► Voice
-   (RAM only)    (on device)          │                          ▲
-                                      └─► Online gateway ────────┘  (facts only, text only)
+ Microphone ─► Whisper STT ─► Router ─┬─► Records + memory ─► Qwen3-0.6B (llama.cpp) ─► Answer checks ─► Voice
+   (RAM only)    (on device)          │                              ▲                   (≤ 50 words)
+                                      └─► Online gateway ────────────┘  (weather, market, news: public identifiers only)
 ```
 
 ---
@@ -22,6 +22,7 @@ Built for Makeathon problem statement 4: *Personal, Offline, Always-On AI Compan
 - [Hardware](#hardware)
 - [Quick start](#quick-start)
 - [Using the assistant](#using-the-assistant)
+- [Architecture](#architecture)
 - [Project layout](#project-layout)
 - [Privacy guarantees](#privacy-guarantees)
 - [Documentation](#documentation)
@@ -116,6 +117,123 @@ same states.
 All settings are environment variables (model path, Whisper size, thresholds, and so on).
 See **[docs/configuration.md](docs/configuration.md)**.
 
+## Architecture
+
+Everything inside the box below runs on the Pi. The online gateway is the only part that
+touches the network, and it only sends public identifiers (a place name, ticker symbols,
+fund codes, a feed address), never the question, the user's records, or audio.
+
+```mermaid
+flowchart LR
+    subgraph Device["Raspberry Pi 4: on the device"]
+        direction LR
+        Mic[Microphone] -->|16 kHz frames, RAM only| Capture[audio/capture.py]
+        Mute[Mute switch] -.gates.-> Capture
+        Capture --> STT[audio/stt.py<br/>faster-whisper tiny.en]
+        STT -->|text| Assistant[pipeline.py<br/>Assistant]
+        Assistant --> Router[brain/router.py]
+        Router -->|personal / general| KB[brain/knowledge.py<br/>records search, SQLite FTS5]
+        Router -->|personal / general| Mem[brain/memory.py<br/>notes, reminders, past turns]
+        KB --> LLM[brain/llm.py<br/>Qwen3-0.6B, llama.cpp]
+        Mem --> LLM
+        Router -->|market| Portfolio[brain/market.py<br/>values computed locally]
+        Router -->|news| News[brain/news.py<br/>topic filtered locally]
+        Router -->|weather| LLM
+        LLM --> Checks[brain/policy.py<br/>answer checks, 50-word cap]
+        Portfolio --> Checks
+        News --> Checks
+        Checks --> TTS[device/tts.py<br/>espeak-ng]
+        TTS --> Spk[Speaker]
+        Assistant -.state.-> LED[device/indicator.py<br/>listening light]
+        Assistant -.spans.-> Traces[(tracing.py<br/>data/traces.sqlite3)]
+        Mem <--> MemDB[(data/memory.sqlite3)]
+        KB --- Records[(knowledge_base/<br/>personal_data.json)]
+    end
+    Portfolio <--> GW[online_gateway.py<br/>allowlist + validation + cache]
+    News <--> GW
+    Router -.weather.-> GW
+    GW <-->|Open-Meteo, Yahoo Finance,<br/>mfapi.in, The Hindu, BBC RSS| Net[(Internet)]
+```
+
+### How a request is handled
+
+`Assistant.respond` in [`pipeline.py`](src/companion/pipeline.py) tries these steps in order
+and stops at the first one that applies. Steps 1–4, 6–7 and 9 never call the language model.
+
+| # | Step | Example | Answered by |
+|---|---|---|---|
+| 1 | Pending confirmation | "yes" after "Do you want me to remember…?" | `memory.py` |
+| 2 | Memory command | "Remember that I parked on B2", "Remind me at 6", "Forget that" | `memory.py` |
+| 3 | Schedule question | "What's my schedule tomorrow?" | `memory.py`, `schedule.py` |
+| 4 | Statement worth noting | "I have a meeting with Jay tomorrow at 7am" → offers to remember it | `memory.py` |
+| 5 | Follow-up | "And my wife's?" is joined to the previous question. A follow-up that names its own recorded topic ("what about my EMI?") is answered by itself | `pipeline.py` |
+| 6 | News | "Any news about TCS?" Whole feeds are fetched; the topic is matched on the device | `news.py` → gateway |
+| 7 | Share market | "How are my investments doing today?" Prices are fetched for the whole watchlist; values and gains are computed in Python | `market.py` → gateway |
+| 8 | Weather | "Will it rain in Mumbai tomorrow?" Facts are read out verbatim; the model adds one line of advice | gateway → `llm.py` |
+| 9 | Loan check | "Can I take a loan of 5 lakhs?" The budget and the EMI are computed from the records, and the answer is built in code | `knowledge.py` |
+| 10 | Local answer | "What is my EMI amount?", "Should I invest more?", "Explain mutual funds" | `knowledge.py` + `memory.py` → `llm.py` |
+
+For a local answer (step 10):
+
+1. **Retrieve records.** `KnowledgeBase.search` finds the records that *alone* cover every
+   meaningful word of the question, after dropping filler words and adding synonyms
+   ("EMI" → installment, loan; "career" → organization, role). It returns at most 4 records,
+   and only the primary user's unless someone else is named ("my wife's income").
+   Advice questions ("can I…", "should I…", "afford", "eligible") also get every record of
+   the category they are about (financial or medical, up to 8 in all), and money
+   questions a monthly budget computed in code, placed first.
+2. **Retrieve memory.** `ConversationMemory.search` finds notes by keywords plus a small
+   embedding model, and past answers only for recall questions ("what did you tell me…").
+3. **Answer without the model when possible.** If a note is the only match, it is quoted
+   directly. If the question is personal and nothing matches, the reply is
+   *"No matched data found."* rather than a guess.
+4. **Ask the model.** Only the matching records, notes and the previous exchange go into
+   the prompt, labelled with whose record each one is.
+5. **Check the answer** before it is spoken (see below).
+
+### Components
+
+| Layer | Modules | Role |
+|---|---|---|
+| Entry and wiring | `main.py`, `app.py`, `config.py` | Reads environment settings (with Raspberry Pi defaults), builds every component once, warms up the models |
+| Turn loop | `pipeline.py` | `MicInput` / `TextInput` produce requests; `Assistant` routes, answers and speaks them, and survives errors in a single turn |
+| Audio | `audio/capture.py`, `audio/stt.py` | Records one utterance in RAM, then transcribes it with faster-whisper |
+| Reasoning | `brain/router.py`, `brain/llm.py`, `brain/prompts.py`, `brain/policy.py` | Picks the route, runs the local model, builds prompts, checks answers |
+| Knowledge and memory | `brain/knowledge.py`, `brain/memory.py`, `brain/schedule.py`, `brain/embeddings.py` | Searches personal records; stores notes, reminders and past turns; parses dates; embeds text for search by meaning |
+| Online facts | `online_gateway.py`, `brain/market.py`, `brain/news.py` | The only network exit, plus the on-device logic that decides what to fetch and computes on the results |
+| Device | `device/indicator.py`, `device/mute.py`, `device/tts.py` | Listening light, mute switch, speech output. Hardware drivers plug in behind these small interfaces |
+| Observability | `telemetry.py`, `tracing.py`, `scripts/traces.py` | Timings and per-turn traces on the device; never prompts, record contents or audio |
+
+### Where data lives
+
+| Data | Location | Lifetime |
+|---|---|---|
+| Personal records | `knowledge_base/personal_data.json`, indexed in memory at start-up | Edited by hand |
+| Company and index names for market lookups | `knowledge_base/market_symbols.json` | Edited by hand |
+| Notes, reminders, past questions and answers | `data/memory.sqlite3` (git-ignored) | Past turns 30 days; notes until "forget that" or "forget everything" |
+| Conversation traces | `data/traces.sqlite3` | 30 days; erased by "forget everything" |
+| Timing log | `logs/assistant.log` | Events and durations only |
+| Models | `models/llm/`, `models/embedding/`, Whisper cache | Loaded from local files only |
+| Audio | RAM only | Discarded after transcription |
+
+### Answer checks
+
+A 0.6B model is fast enough for a Pi but makes predictable mistakes, so its output is
+checked in code rather than by adding more prompt rules (longer prompts made its
+answers worse):
+
+| Check | What it prevents |
+|---|---|
+| Copied example figure | The prompt's example salary ("INR 50,000") being presented as real data |
+| False promise | "I'll remember that." Only the app can save notes, so the user is asked instead |
+| Uncertain answers | "Not recorded…" is spoken but never stored as a fact |
+| Speaking as the user | "I am 175 cm tall" → "You are 175 cm tall"; "my" → "your" |
+| Length | At most `MAX_REPLY_WORDS` (50) words, cut at the last full sentence, with generation capped at `LLM_MAX_TOKENS` (80) |
+
+For the full design (the indicator's state machine, retrieval stages, memory search,
+the online/offline rules and how each is tested, Pi performance decisions, and extension
+points), see **[docs/architecture.md](docs/architecture.md)**.
+
 ## Project layout
 
 ```
@@ -125,11 +243,13 @@ docs/
   configuration.md                every environment variable
   architecture.md                 pipeline, modules, privacy boundary, extension points
   observability.md                conversation traces: what is recorded, CLI, dashboard
+  benchmarks.md                   how the models were chosen; how to re-run the benchmarks
 scripts/
   setup.sh                        one-time setup (Pi OS / Debian / macOS)
   run.sh                          start the assistant with model hubs forced offline
   mic_test.py                     record a test clip
   traces.py                       view conversation traces: list, show, stats, serve (dashboard)
+  eval_llm.py, eval_assistant.py, eval_memory_retrieval.py   benchmarks with the real models
 src/
   main.py                         entry point
   companion/
@@ -140,10 +260,15 @@ src/
     telemetry.py                  JSON timing logs (no prompts or audio)
     tracing.py                    per-turn traces stored on the device
     audio/   capture.py, stt.py
-    brain/   llm.py, router.py, prompts.py, policy.py, knowledge.py, memory.py
+    brain/   llm.py, router.py, prompts.py, policy.py, knowledge.py, memory.py,
+             schedule.py, embeddings.py, market.py, news.py
     device/  indicator.py, mute.py, tts.py
 knowledge_base/personal_data.json synthetic personal records used in the demo
+knowledge_base/market_symbols.json company and index names mapped to ticker symbols
+models/                           local model files (LLM, embeddings); not in git
+data/                             memory and trace databases; not in git
 tests/                            unit tests (run without models or audio hardware)
+tests/data/                       retrieval and conversation benchmarks
 ```
 
 ## Privacy guarantees
