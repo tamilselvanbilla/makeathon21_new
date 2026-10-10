@@ -15,6 +15,8 @@ from .brain.memory import (
     MemoryCommand,
     describe,
     is_follow_up,
+    refers_back,
+    resolve_follow_up,
     is_worth_noting,
     note_answer,
     parse_memory_command,
@@ -22,7 +24,7 @@ from .brain.memory import (
     second_person,
     that_clause,
 )
-from .brain.policy import as_second_person, full_sentences, is_uncertain, limit_words, require_local_answer
+from .brain.policy import as_second_person, drop_repeated, full_sentences, is_uncertain, limit_words, require_local_answer
 from .brain.news import headlines_reply, is_news_question, news_request
 from .brain.prompts import (
     DIDNT_CATCH_ANSWER,
@@ -200,15 +202,17 @@ class Assistant:
             set_turn(route="offer_note")
             return f"Do you want me to remember{that_clause(text)}?"
 
-        previous = self.memory.last_turn() if is_follow_up(text) else None
-        if previous and self._stands_alone(text):
+        previous = self.memory.last_turn() if is_follow_up(text) or refers_back(text) else None
+        if previous and not refers_back(text) and self._stands_alone(text):
             # "What about my EMI amount?" after a share question is a new question; merging
             # it would send it down the market route and read out share prices.
             previous = None
         if previous:
             set_turn(follow_up=True)
-        # "And my wife's?" is searched and routed as "<previous question> and my wife's?".
-        effective = f"{previous.question} {text}" if previous else text
+        # "And my wife's?" and "when does it end?" are searched and routed as
+        # "<previous question> <follow-up>", and stored that way, so a third question
+        # ("which bank is it with?") still knows the topic.
+        effective = resolve_follow_up(previous.question, text) if previous else text
         if is_news_question(text):
             set_turn(route="news")
             reply, keep = self._respond_with_news(text)
@@ -226,13 +230,16 @@ class Assistant:
             reply, keep = self._respond_locally(text, effective, previous)
         set_turn(remembered=keep)
         if keep:  # honest "I don't know" replies are not remembered as facts
-            self.memory.add_turn(text, reply)
+            self.memory.add_turn(effective, reply)
         return reply
 
     def _respond_locally(self, text: str, effective: str, previous) -> tuple[str, bool]:
         self.indicator.show(IndicatorState.THINKING)
         with span("knowledge"):
             knowledge = self.knowledge.context_for(effective)
+            if previous and not knowledge:
+                # Joined to the previous question by mistake ("what time is it?"): try it alone.
+                knowledge = self.knowledge.context_for(text)
             # Which records (category and owner), never their contents.
             found = re.findall(r"^(\w+) record of ([^:]+):", knowledge, re.M)
             annotate(records=len(found), sources=[f"{c.lower()}/{o}" for c, o in found])
@@ -252,7 +259,9 @@ class Assistant:
         if not knowledge and not remembered and WHERE_IS_MINE.match(text):
             set_turn(route="no_note")
             return NO_NOTE_ANSWER, False
-        if not knowledge and not remembered and self.knowledge.is_personal(effective):
+        # Judged on the words just said: "is that healthy?" is answered from the previous
+        # exchange, not refused because the previous question was about "my" records.
+        if not knowledge and not remembered and self.knowledge.is_personal(text):
             # Nothing on record or in memory: answer honestly instead of guessing.
             set_turn(route="not_in_records")
             return NOT_IN_RECORDS_ANSWER, False
@@ -268,6 +277,8 @@ class Assistant:
         # The model sometimes starts by repeating the prompt's "Question: <text>" line.
         answer = re.sub(rf"^Question:\s*{re.escape(text.rstrip('?. '))}\W*", "", answer, flags=re.I) or answer
         answer = full_sentences(as_second_person(answer))
+        if previous:
+            answer = drop_repeated(answer, previous.answer)
         # Records store 50000 and the model says 50,000 (the bond's face value), so commas are ignored.
         if EXAMPLE_FIGURE in answer and EXAMPLE_FIGURE.replace(",", "") not in f"{knowledge} {remembered} {earlier}".replace(",", ""):
             set_turn(guard="example_figure", model_answer=answer)

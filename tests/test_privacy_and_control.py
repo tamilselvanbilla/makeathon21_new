@@ -500,6 +500,54 @@ class AdviceTests(unittest.TestCase):
         self.assertEqual(llm.calls, [])
 
 
+class ConversationContextTests(unittest.TestCase):
+    """Follow-ups that point back ("when does it end?") keep the previous topic."""
+
+    def setUp(self):
+        self.llm = FakeLLM("Noted.")
+        self.assistant = Assistant(llm=self.llm, knowledge=KnowledgeBase(load_knowledge()),
+                                   gateway=OnlineGateway(enabled=False), indicator=RecordingIndicator(),
+                                   speaker=FakeSpeaker(), memory=ConversationMemory(clock=Clock()))
+
+    def ask(self, text):
+        return quietly(self.assistant.respond, text)[0]
+
+    def test_pronoun_follow_ups_keep_the_topic_over_several_turns(self):
+        self.ask("what is my emi amount")
+        self.ask("when does it end?")
+        self.assertIn("Loan End Date: 2033-10-05", self.llm.calls[-1])
+        self.assertNotIn("accident insurance", self.llm.calls[-1])
+        self.ask("which bank is it with?")
+        self.assertIn("Bank: HDFC Bank", self.llm.calls[-1])
+
+    def test_short_follow_up_keeps_the_topic(self):
+        self.ask("tell me about my car")
+        self.ask("who is the insurer?")
+        self.assertIn("Toyota Corolla", self.llm.calls[-1])
+
+    def test_loan_follow_up_uses_the_new_amount(self):
+        self.assertTrue(self.ask("can I take a loan of 5 lakhs").startswith("Not comfortably."))
+        self.assertIn("INR 4,249", self.ask("what about 2 lakhs?"))
+        self.assertIn("INR 6,374", self.ask("and 3 lakhs?"))
+
+    def test_budget_follow_up_gets_the_computed_budget(self):
+        self.ask("what is my monthly income")
+        self.ask("how much is left after that?")
+        self.assertIn("left after expenses and EMIs INR 6,800", self.llm.calls[-1])
+
+    def test_new_question_is_not_joined_to_the_previous_one(self):
+        self.ask("what is my emi amount")
+        self.assertEqual(self.ask("what is my blood group"), NOT_IN_RECORDS_ANSWER)
+        self.ask("what is the capital of France")
+        self.assertNotIn("Previous question", self.llm.calls[-1])
+
+    def test_sentences_repeated_from_the_previous_answer_are_dropped(self):
+        previous = "Your car is a Toyota Corolla. It was bought in 2021."
+        self.assertEqual(policy.drop_repeated(previous + " Its insurance expires on 2027-06-15.", previous),
+                         "Its insurance expires on 2027-06-15.")
+        self.assertEqual(policy.drop_repeated(previous, previous), previous)
+
+
 class MicrophoneSelectionTests(unittest.TestCase):
     MAC = [(0, "MacBook Pro Microphone")]
     PI = [(0, "bcm2835 Headphones: - (hw:0,0)"), (1, "Monitor of Built-in Audio"), (2, "USB PnP Sound Device: Audio (hw:2,0)")]

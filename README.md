@@ -166,7 +166,7 @@ and stops at the first one that applies. Steps 1–4, 6–7 and 9 never call the
 | 2 | Memory command | "Remember that I parked on B2", "Remind me at 6", "Forget that" | `memory.py` |
 | 3 | Schedule question | "What's my schedule tomorrow?" | `memory.py`, `schedule.py` |
 | 4 | Statement worth noting | "I have a meeting with Jay tomorrow at 7am" → offers to remember it | `memory.py` |
-| 5 | Follow-up | "And my wife's?" is joined to the previous question. A follow-up that names its own recorded topic ("what about my EMI?") is answered by itself | `pipeline.py` |
+| 5 | Follow-up | "And my wife's?", "when does **it** end?", "is **that** healthy?" or a short "who is the insurer?" within 10 minutes is joined to the previous question, and stored joined, so a third question still knows the topic. A follow-up that names its own recorded topic ("what about my EMI?") is answered by itself | `pipeline.py`, `memory.py` |
 | 6 | News | "Any news about TCS?" Whole feeds are fetched; the topic is matched on the device | `news.py` → gateway |
 | 7 | Share market | "How are my investments doing today?" Prices are fetched for the whole watchlist; values and gains are computed in Python | `market.py` → gateway |
 | 8 | Weather | "Will it rain in Mumbai tomorrow?" Facts are read out verbatim; the model adds one line of advice | gateway → `llm.py` |

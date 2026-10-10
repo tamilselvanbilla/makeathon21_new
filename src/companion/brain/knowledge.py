@@ -54,7 +54,7 @@ STOPWORDS = frozenset(
     keep kept use used using long normal level like right still just also ever
     into under over onto per than then her his him she he they them pay
     related regarding question questions answer summarize summarise summary overview
-    amount should would
+    amount should would that those these again
     """.split()
 )
 # Everyday words mapped to the vocabulary used in the records, so "earn"
@@ -110,6 +110,7 @@ SYNONYMS = {
     "background": "organization role school college qualification",
     "year": "years period",
     "lose": "weight bmi", "fat": "weight bmi", "obese": "bmi overweight",
+    "healthy": "bmi category vitals", "unhealthy": "bmi category vitals",
     "redeem": "redemption", "withdraw": "redemption", "often": "frequency", "frequently": "frequency",
     "buy": "purchase", "bought": "purchase", "purchased": "purchase", "issued": "issue",
 }
@@ -142,17 +143,26 @@ ASSUMED_LOAN_RATE = 0.10
 ASSUMED_LOAN_YEARS = 5
 LOAN_WORDS = re.compile(r"\b(?:loans?|emis?|borrow|mortgage|afford|affordable|eligible|eligibility|qualify|credit)\b", re.I)
 AMOUNT = re.compile(r"(\d[\d,]*(?:\.\d+)?)\s*(lakhs?|lacs?|crores?|k|thousand)?\b", re.I)
+# Smaller numbers are years or counts ("over 5 years"), not money.
+MIN_AMOUNT = 1_000
+# "How much is left after that?", "how much can I save?": answered from the computed budget.
+BUDGET = re.compile(r"\b(?:how much (?:money )?(?:is |do i have |will i have )?(?:left|remaining)|surplus|spare money|save|saving|savings)\b", re.I)
 SCALE = {"lakh": 100_000, "lac": 100_000, "crore": 10_000_000, "k": 1_000, "thousand": 1_000}
 
 
 def spoken_amount(text: str) -> tuple[float, bool] | None:
-    """The first amount in the question and whether it is a monthly EMI:
-    "a loan of 5 lakhs" -> (500000, False), "an EMI of 15,000" -> (15000, True)."""
-    match = AMOUNT.search(text)
-    if not match:
+    """The last amount in the question and whether it is a monthly EMI: "a loan of 5
+    lakhs" -> (500000, False), "an EMI of 15,000" -> (15000, True). The last one, so a
+    follow-up ("can I take 5 lakhs ... what about 2 lakhs?") is about the new amount."""
+    def value(match: re.Match) -> float:
+        unit = (match.group(2) or "").casefold().rstrip("s")
+        return float(match.group(1).replace(",", "")) * SCALE.get(unit, 1)
+
+    amounts = [match for match in AMOUNT.finditer(text) if value(match) >= MIN_AMOUNT]
+    if not amounts:
         return None
-    unit = (match.group(2) or "").casefold().rstrip("s")
-    amount = float(match.group(1).replace(",", "")) * SCALE.get(unit, 1)
+    match = amounts[-1]
+    amount = value(match)
     before = text[: match.start()].casefold()
     is_emi = bool(re.search(r"\b(?:emis?|installments?|per month|a month|monthly)\b", before + text[match.end():match.end() + 12].casefold()))
     return amount, is_emi
@@ -433,7 +443,10 @@ class KnowledgeBase:
         return counts
 
     def is_advice(self, question: str) -> bool:
-        return bool(ADVICE.search(question))
+        return bool(ADVICE.search(question)) or self._is_budget(question)
+
+    def _is_budget(self, question: str) -> bool:
+        return bool(BUDGET.search(question)) and not LOAN_WORDS.search(question)
 
     def advice_categories(self, question: str) -> list[str]:
         """Categories an advice question is about: from its words, or else from the
@@ -441,6 +454,8 @@ class KnowledgeBase:
         words = set(tokenize(question))
         words |= {w[:-1] for w in words if w.endswith("s")}
         found = [category for category, topic in ADVICE_TOPICS.items() if words & topic]
+        if self._is_budget(question) and "financial" not in found:
+            found.insert(0, "financial")
         if found:
             return found
         terms, _ = self._terms(question)
@@ -489,7 +504,7 @@ class KnowledgeBase:
         """The spoken answer to "can I take a loan (of 5 lakhs)?", computed from the records.
         A 0.6B model given these figures still said a loan it couldn't afford was fine, so
         the comparison is made here and the model is not used. "" if it doesn't apply."""
-        if not (self.is_advice(question) and LOAN_WORDS.search(question)):
+        if not (ADVICE.search(question) and LOAN_WORDS.search(question)):
             return ""
         owners = self.mentioned_owners(question) or {self.primary_user}
         owner = sorted(owners)[0]

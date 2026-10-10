@@ -83,6 +83,17 @@ def full_sentences(text: str) -> str:
     return text[: ends[-1]] if ends else text.rstrip(",;:- ") + "."
 
 
+def drop_repeated(answer: str, previous_answer: str) -> str:
+    """Remove sentences copied from the previous answer: shown the last exchange for
+    context, the small model often repeats it before answering the follow-up."""
+    seen = {s.strip().casefold() for s in SENTENCE_SPLIT.split(previous_answer) if s.strip()}
+    kept = [s for s in SENTENCE_SPLIT.split(answer) if s.strip() and s.strip().casefold() not in seen]
+    return " ".join(kept) if kept else answer
+
+
+SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
+
+
 def limit_words(text: str, max_words: int) -> str:
     """At most `max_words` words, ending at the last full sentence that fits."""
     words = text.split()

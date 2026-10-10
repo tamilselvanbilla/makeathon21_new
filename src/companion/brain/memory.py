@@ -109,6 +109,14 @@ RECALL_WORDS = frozenset(
 )
 # Short questions that only make sense after the previous one.
 FOLLOW_UP = re.compile(r"^\W*(?:and|what about|how about|also|same for|what of|then)\b", re.I)
+# Words pointing back at the previous answer: "when does it end?", "is that healthy?",
+# "what is my role there?", "when does its insurance expire?".
+REFERS_BACK = re.compile(r"\b(?:it|its|it's|that|this|those|these|there|them|they|their|he|she|her|his|then|same)\b", re.I)
+# A question this short ("who is the insurer?", "how often?") only makes sense in context.
+SHORT_FOLLOW_UP_WORDS = 4
+# A follow-up's question is stored resolved ("<previous question> <follow-up>") so the
+# next follow-up still knows the topic; this many words from the end are kept.
+RESOLVED_QUESTION_WORDS = 40
 
 
 class TextEmbedder(Protocol):
@@ -216,6 +224,17 @@ def is_recall_question(text: str) -> bool:
 
 def is_follow_up(text: str) -> bool:
     return bool(FOLLOW_UP.match(text))
+
+
+def refers_back(text: str) -> bool:
+    """True for questions that only make sense with the previous one: they point back
+    at it ("when does it end?") or are too short to stand alone ("who is the insurer?")."""
+    return bool(REFERS_BACK.search(text)) or len(re.findall(r"[A-Za-z0-9]+", text)) <= SHORT_FOLLOW_UP_WORDS
+
+
+def resolve_follow_up(previous_question: str, text: str) -> str:
+    """ "<previous question> <follow-up>", trimmed to the last RESOLVED_QUESTION_WORDS words."""
+    return " ".join(f"{previous_question} {text}".split()[-RESOLVED_QUESTION_WORDS:])
 
 
 def is_worth_noting(text: str, now: datetime) -> bool:
