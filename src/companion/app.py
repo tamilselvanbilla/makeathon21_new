@@ -65,6 +65,7 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Loading Whisper '{config.stt.model_size}' (beam {config.stt.beam_size})...")
         hotwords = " ".join(filter(None, [config.stt.hotwords, config.default_place]))
         transcriber = Transcriber(config.stt, hotwords=hotwords)
+        transcriber.warm_up()
         source = MicInput(capture, transcriber, SoftwareMuteSwitch(), indicator)
 
     if args.text or args.no_tts or not config.tts_enabled:

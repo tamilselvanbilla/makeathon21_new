@@ -49,10 +49,14 @@ class Embedder:
         options = ort.SessionOptions()
         options.intra_op_num_threads = threads
         options.inter_op_num_threads = 1
+        # Idle ORT threads otherwise busy-wait after each call, taking cores from the
+        # LLM that runs right after a memory search.
+        options.add_session_config_entry("session.intra_op.allow_spinning", "0")
         self._session = ort.InferenceSession(
             str(folder / self.spec.onnx_file), sess_options=options, providers=["CPUExecutionProvider"]
         )
         self._inputs = {i.name for i in self._session.get_inputs()}
+        self.embed(["warm up"])  # the first run allocates buffers; don't make a question pay for it
 
     def embed(self, texts: list[str], query: bool = False) -> np.ndarray:
         """Return one normalised vector per text, shape (len(texts), dim)."""

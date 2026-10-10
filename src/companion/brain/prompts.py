@@ -25,9 +25,12 @@ def build_system_prompt(
         f"You hold the records of {primary_user} and their family{family_line}: finances "
         "(income, expenses, investments, loans), insurance policies, medical and health records, "
         "identity documents and other personal details, and work and education history. The "
-        "records relevant to each question are given as Knowledge, and what the user told you "
-        "earlier as Memory; trust them. Each record says whose it is; never attribute one "
-        "person's record to someone else. For questions about the user or their family, use only "
+        "records relevant to each question are given as Knowledge, and saved notes and "
+        "earlier conversations as Memory. Treat Knowledge as authoritative for recorded facts. "
+        "Prior assistant replies in Memory are conversation history, not verified facts; use them "
+        "only to recall what was said, and prefer Knowledge when they conflict. Each record says "
+        "whose it is; never attribute one person's record to someone else. For questions about "
+        "the user or their family, use only "
         "Knowledge and Memory, never invent numbers, dates, or medical details, and if the answer "
         "is not there, say so. Answer general questions that are not about them briefly from "
         "general knowledge. Read out identity numbers only when asked for them. For medical or "
@@ -50,7 +53,7 @@ def build_user_prompt(question: str, knowledge: str, memory: str = "", earlier: 
         parts.append(f"Previous question: {earlier}")
     parts += [f"Question: {question}", f"Knowledge: {knowledge or NO_RECORDS}"]
     if memory:
-        parts.append(f"Memory (things the user told you and past conversations):\n{memory}")
+        parts.append(f"Memory (saved notes and past conversations; prior assistant replies are not verified facts):\n{memory}")
     return "\n".join(parts)
 
 

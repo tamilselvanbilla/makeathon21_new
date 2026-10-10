@@ -502,6 +502,7 @@ class PromptTests(unittest.TestCase):
                      "identity documents", "use only Knowledge and Memory",
                      "general questions", "identity numbers only when asked"):
             self.assertIn(part, prompt)
+        self.assertIn("Prior assistant replies in Memory are conversation history, not verified facts", prompt)
         self.assertNotIn("wife Jane", prompt)
         self.assertNotIn("son Robert", prompt)
 

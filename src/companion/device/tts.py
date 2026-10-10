@@ -6,6 +6,8 @@ import shutil
 import subprocess
 from typing import Callable, Protocol
 
+from ..tracing import span
+
 TTS_ENGINE = os.getenv("TTS_ENGINE", "auto")
 TTS_RATE = int(os.getenv("TTS_RATE", "130"))
 TTS_VOLUME = float(os.getenv("TTS_VOLUME", "1.0"))
@@ -82,13 +84,15 @@ class EspeakSpeaker:
         print(f"Assistant: {text}")
         try:
             # Text goes through stdin, so a reply starting with "-" is never an option.
-            wav = self._run(
-                self.synth_command(),
-                input=text.encode("utf-8"),
-                capture_output=True,
-                timeout=SPEECH_TIMEOUT_SECONDS,
-                check=True,
-            ).stdout
+            # Synthesis is the wait before speech starts; playback lasts as long as the reply.
+            with span("tts_synth"):
+                wav = self._run(
+                    self.synth_command(),
+                    input=text.encode("utf-8"),
+                    capture_output=True,
+                    timeout=SPEECH_TIMEOUT_SECONDS,
+                    check=True,
+                ).stdout
         except (subprocess.CalledProcessError, OSError, subprocess.TimeoutExpired) as exc:
             print(f"(Speech output failed: espeak-ng: {exc})")
             return
@@ -96,8 +100,9 @@ class EspeakSpeaker:
         errors = []
         for device in [self.device] + [d for d in self.devices if d != self.device]:
             try:
-                self._run(self.play_command(device), input=wav, capture_output=True,
-                          timeout=SPEECH_TIMEOUT_SECONDS, check=True)
+                with span("tts_play", seconds=round(max(len(wav) - 44, 0) / 44_100, 1)):
+                    self._run(self.play_command(device), input=wav, capture_output=True,
+                              timeout=SPEECH_TIMEOUT_SECONDS, check=True)
             except subprocess.CalledProcessError as exc:
                 detail = exc.stderr.decode(errors="replace").strip() if exc.stderr else str(exc)
                 errors.append(f"{device}: {detail}")

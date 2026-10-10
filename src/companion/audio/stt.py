@@ -58,6 +58,23 @@ class Transcriber:
                 f"(for another size: WHISPER_MODEL_SIZE={config.model_size} scripts/setup.sh --skip-system)."
             ) from None
 
+    def warm_up(self) -> None:
+        """Run the encoder once and load the VAD model at start-up. Both happen lazily
+        on the first transcription otherwise, so the first question paid for them."""
+        from faster_whisper.vad import get_vad_model
+
+        with timed_event("stt_warm_up", model=self.config.model_size):
+            get_vad_model()
+            segments, _ = self._model.transcribe(
+                np.zeros(16_000, dtype=np.float32),
+                beam_size=self.config.beam_size,
+                language=self.config.language,
+                hotwords=self.hotwords,
+                without_timestamps=True,
+                condition_on_previous_text=False,
+            )
+            list(segments)
+
     def transcribe(self, audio: "np.ndarray | str") -> str:
         """Transcribe a 16 kHz float32 waveform or an audio file path."""
         if isinstance(audio, np.ndarray) and audio.size == 0:
@@ -69,6 +86,10 @@ class Transcriber:
                 language=self.config.language,
                 vad_filter=True,
                 hotwords=self.hotwords,
+                # One short question per call: no timestamp tokens to decode, and no
+                # previous window to condition on.
+                without_timestamps=True,
+                condition_on_previous_text=False,
             )
             text = " ".join(segment.text.strip() for segment in segments if reliable(segment)).strip()
         if looks_like_noise(text) or echoes_prompt(text, self.hotwords):
