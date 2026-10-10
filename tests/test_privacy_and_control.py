@@ -32,7 +32,7 @@ from companion.brain.router import Intent, extract_place, parse_lookup, route  #
 from companion.config import CaptureConfig  # noqa: E402
 from companion.device.indicator import ConsoleIndicator, IndicatorState  # noqa: E402
 from companion.device.mute import SoftwareMuteSwitch  # noqa: E402
-from companion.device.tts import EspeakSpeaker  # noqa: E402
+from companion.device.tts import EspeakSpeaker, TTS_RATE  # noqa: E402
 from companion.brain.market import Portfolio  # noqa: E402
 from companion.brain.news import news_request  # noqa: E402
 from companion.online_gateway import (  # noqa: E402
@@ -1201,6 +1201,7 @@ class SpeechOutputTests(unittest.TestCase):
             speaker.say("-v is not an option here")
         (synth, synth_input), (play, play_input) = calls
         self.assertEqual(synth[:3], ["espeak-ng", "--stdin", "--stdout"])
+        self.assertEqual(synth[synth.index("-s") + 1], str(TTS_RATE))
         self.assertEqual(synth_input, b"-v is not an option here")
         self.assertEqual(play, ["aplay", "-q", "-D", "plughw:CARD=Headphones"])
         self.assertEqual(play_input, b"RIFF-wav")

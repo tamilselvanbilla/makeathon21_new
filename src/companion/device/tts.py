@@ -7,7 +7,7 @@ import subprocess
 from typing import Callable, Protocol
 
 TTS_ENGINE = os.getenv("TTS_ENGINE", "auto")
-TTS_RATE = int(os.getenv("TTS_RATE", "150"))
+TTS_RATE = int(os.getenv("TTS_RATE", "130"))
 TTS_VOLUME = float(os.getenv("TTS_VOLUME", "1.0"))
 TTS_VOICE = os.getenv("TTS_VOICE", "")
 # ALSA device for aplay, e.g. "plughw:CARD=Headphones" for the Pi 4's 3.5 mm jack.

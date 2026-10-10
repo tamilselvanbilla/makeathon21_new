@@ -60,11 +60,20 @@ the device's native rate and resampled.
 | Variable | Default | Description |
 |---|---|---|
 | `TTS_ENABLED` | `1` | `0` prints replies instead of speaking (same as `--no-tts`) |
-| `TTS_RATE` | `150` | Words per minute |
+| `TTS_RATE` | `130` | Words per minute; try `120` for slower speech |
 | `TTS_VOLUME` | `1.0` | 0.0 to 1.0 |
 | `TTS_VOICE` | *(system default)* | Voice name, e.g. `en-us` or `en-gb` for espeak-ng (`espeak-ng --voices=en` lists them); a voice id for pyttsx3 |
 | `TTS_ENGINE` | `auto` | `auto` uses espeak-ng + aplay when both are installed (Linux/Pi), otherwise pyttsx3 (macOS/Windows). Force with `espeak` or `pyttsx3` |
 | `AUDIO_OUTPUT_DEVICE` | *(automatic)* | ALSA device for `aplay`. Unset: the microphone's own USB device (e.g. a headset), then the Pi's 3.5 mm jack (`plughw:CARD=Headphones,DEV=0`), then `default`; a device that fails is skipped and the first that works is kept (start-up prints `Speaker: …`). On a Pi running PipeWire, `default` fails with error 524 outside the desktop session. List with `scripts/run.sh --list-speakers` |
+
+Try different speech rates and English voices with the speaker test before a session:
+
+```bash
+TTS_RATE=120 TTS_VOICE=en-us scripts/run.sh --speaker-test
+TTS_RATE=130 TTS_VOICE=en-gb scripts/run.sh --speaker-test
+```
+
+For clearer sound, also check speaker placement and raise the ALSA output volume if needed.
 
 ## Online lookups
 
