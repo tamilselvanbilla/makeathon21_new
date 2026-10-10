@@ -47,6 +47,8 @@ STOPWORDS = frozenset(
     say said says written put hold holding own owned owns go goes went make made
     keep kept use used using long normal level like right still just also ever
     into under over onto per than then her his him she he they them pay
+    related regarding question questions answer summarize summarise summary overview
+    amount should would
     """.split()
 )
 # Everyday words mapped to the vocabulary used in the records, so "earn"
@@ -75,7 +77,7 @@ SYNONYMS = {
     "pill": "prescription medication dosage", "drug": "prescription medication dosage",
     "weigh": "weight kg", "heavy": "weight kg", "tall": "height cm",
     "oxygen": "oxygen saturation", "pulse": "pulse per minute", "heart": "pulse per minute",
-    "test": "report medical", "checkup": "medical history report review", "health": "medical history review",
+    "test": "report medical", "checkup": "medical history report review", "health": "medical history review vitals bmi",
     "rent": "housing expense", "groceries": "food expense", "month": "monthly",
     "left": "remaining", "remaining": "remaining tenure",
     "validity": "valid from to renewal expiry", "valid": "valid from to renewal expiry",
@@ -92,6 +94,16 @@ SYNONYMS = {
     "drive": "vehicle", "driving": "vehicle license", "insurer": "insurance provider",
     "company": "organization employer provider", "complete": "years period", "completed": "years period",
     "rate": "rate minute percent",
+    # Career questions: the records hold organizations, roles and periods.
+    "career": "organization role", "experience": "organization role period",
+    "experienced": "organization role period", "employment": "organization role employer",
+    "employed": "organization role employer", "profession": "role organization",
+    "professional": "role organization", "occupation": "role organization",
+    "worked": "organization role", "working": "organization role",
+    "resume": "organization role school college qualification", "cv": "organization role school college qualification",
+    "background": "organization role school college qualification",
+    "year": "years period",
+    "lose": "weight bmi", "fat": "weight bmi", "obese": "bmi overweight",
 }
 
 Records = dict[str, list[dict[str, Any]]]
@@ -158,8 +170,10 @@ def _acronyms(entry: dict[str, Any]) -> list[str]:
 
 
 def tokenize(text: str) -> list[str]:
-    """Lower-case word tokens with possessive 's removed ("wife's" -> "wife")."""
-    return [re.sub(r"'s$", "", word) for word in re.findall(r"[a-z0-9]+(?:'s)?", text.casefold())]
+    """Lower-case word tokens with possessive 's removed ("wife's" -> "wife") and
+    dotted acronyms joined ("E.M.I." -> "emi", as speech-to-text may write them)."""
+    text = re.sub(r"\b(?:[a-z]\.){2,}", lambda m: m.group().replace(".", ""), text.casefold())
+    return [re.sub(r"'s$", "", word) for word in re.findall(r"[a-z0-9]+(?:'s)?", text)]
 
 
 class KnowledgeBase:
@@ -320,6 +334,11 @@ class KnowledgeBase:
                 )
             )
         return [Match(*row[1:]) for row in hits[: self.top_k]]
+
+    def names_topic(self, question: str) -> bool:
+        """True when the question asks about something itself ("my EMI"), not only about
+        a person ("and my wife's?"), and records on it exist."""
+        return bool(self._concepts(question)) and bool(self.search(question))
 
     def _concepts(self, question: str) -> list[tuple[str, str]]:
         """(word, FTS query) per meaningful question word; the query matches the word or a synonym."""

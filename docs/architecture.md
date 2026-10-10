@@ -23,8 +23,7 @@ flowchart LR
         Mic[Microphone] -->|80 ms frames, 16 kHz, RAM only| Capture[capture.py<br/>record utterance]
         Mute[Mute switch] -.gates.-> Capture
         Capture --> STT[stt.py<br/>faster-whisper]
-        STT -->|text| Wake[wake.py<br/>wake phrase / sleep]
-        Wake -->|request| Router[router.py]
+        STT -->|text| Router[router.py]
         Router -->|local_reasoning| KB[knowledge.py<br/>personal records]
         KB --> LLM[llm.py<br/>Qwen3-0.6B via llama.cpp]
         Router -->|online_factual_lookup| Parse[parse_lookup<br/>place + day]
@@ -60,14 +59,12 @@ stateDiagram-v2
 
 1. **Mute check.** `MicInput` asks the `MuteSwitch`. If muted, the indicator shows
    `MUTED` and the microphone is never opened.
-2. **Capture.** `MicrophoneCapture.frames` streams 80 ms frames of 16 kHz audio
+2. **Capture.** Only the last 0.5 s before speech starts is kept, and speech must last
+   `SPEECH_ONSET_FRAMES` (3) frames to count, so earlier room noise never reaches Whisper (on the
+   Pi it had made transcription take 8–16 s). `MicrophoneCapture.frames` streams 80 ms frames of 16 kHz audio
    (resampled if the mic can't do 16 kHz). `record_command` keeps audio once loudness
    passes `SPEECH_RMS_THRESHOLD` and stops after `SILENCE_SECONDS` of quiet. If the
    mute switch flips, the stream stops and the audio is discarded.
-   **Wake phrase:** while asleep (`IDLE`), only the first 3 s are transcribed; if the
-   text doesn't start with the wake phrase it is dropped. Once awake (`LISTENING`),
-   every utterance is a request until `CONVERSATION_TIMEOUT` seconds pass without
-   speech, a sleep phrase is said, or the device is muted (see *Wake phrase* below).
 3. **Transcribe.** `Transcriber` runs faster-whisper (int8, CPU) on the in-memory
    waveform. Its built-in voice-activity filter trims silence.
 4. **Route.** `router.route` returns `EXIT`, `ONLINE_LOOKUP` (weather, forecast, news,
@@ -76,8 +73,9 @@ stateDiagram-v2
 5. **Look up (optional).** `OnlineGateway.lookup` validates the query and calls a
    provider. If it cannot, the assistant says so and stops; it never lets the model
    guess real-time facts.
-6. **Retrieve.** Memory commands ("remember that…", "forget that") are handled first,
-   without the model. A follow-up ("and my wife's?") is combined with the previous
+6. **Retrieve.** Memory commands ("remember that…", "remind me…", "forget that"), the
+   answer to a pending "what should I remember?" / "do you want me to remember…?", and
+   schedule questions ("what's my schedule tomorrow?") are handled first, without the model. A follow-up ("and my wife's?") is combined with the previous
    question. `KnowledgeBase.search` finds personal records and `ConversationMemory.search`
    finds notes and, for recall questions, past exchanges (details below). An answer
    that comes only from a note is given directly from it. If the question is personal
@@ -109,14 +107,15 @@ continues, so an always-on device does not die on one bad request.
 | `companion/brain/policy.py` | What may go online; when to fall back | `is_allowed_cloud_lookup`, `require_local_answer` |
 | `companion/brain/knowledge.py` | Loads personal records and searches them (FTS5, owners, record-type focus) | `load_knowledge`, `KnowledgeBase`, `Match` |
 | `companion/brain/memory.py` | Notes, past exchanges, follow-ups, forgetting; SQLite on the device | `ConversationMemory`, `parse_memory_command`, `MemoryItem` |
-| `companion/brain/wake.py` | Wake phrase and sleep commands in transcripts | `WakePhrase`, `is_sleep_command` |
 | `companion/device/indicator.py` | Listening-light states | `IndicatorState`, `Indicator`, `ConsoleIndicator` |
 | `companion/device/mute.py` | Mute switch | `MuteSwitch`, `SoftwareMuteSwitch` |
 | `companion/device/tts.py` | Spoken output: espeak-ng + aplay on Linux (no sound server needed), pyttsx3 elsewhere | `Speaker`, `EspeakSpeaker`, `Pyttsx3Speaker`, `PrintSpeaker`, `make_speaker` |
 | `companion/online_gateway.py` | The only network exit: weather, market, news; validation, allowlist, cache, per-feature switches | `OnlineGateway`, `LookupRequest`, `LookupResult`, `LookupUnavailable` |
 | `companion/brain/market.py` | Portfolio: which symbols to fetch, all values and gains computed locally | `Portfolio`, `Holding` |
 | `companion/brain/news.py` | Which feeds to fetch; topic filtering on the device | `news_request`, `headlines_reply` |
-| `companion/telemetry.py` | JSON timing log without content | `log_event`, `timed_event` |
+| `companion/telemetry.py` | JSON timing log without content; each timed event is also a trace span | `log_event`, `timed_event` |
+| `companion/tracing.py` | Per-turn traces (spans, routes, token counts) in `data/traces.sqlite3`; console summary | `Tracer`, `span`, `annotate`, `set_turn` |
+| `companion/brain/schedule.py` | Dates and times in spoken notes | `parse_when`, `When` |
 
 ## Knowledge retrieval
 
@@ -177,12 +176,19 @@ hedged.
 
 | Memory | Stored when | Used when |
 |---|---|---|
-| Note | "Remember (that) …" | Every question. If a note is the only match, the reply is built from it directly ("On 9 October you told me that you parked on level B2"), so a small model can't misquote it |
+| Note | "Remember (that) …", "Remind me …", or "yes" to "Do you want me to remember …?" | Every question. If a note is the only match, the reply is built from it directly ("On 9 October you told me that you parked on level B2"), so a small model can't misquote it |
 | Exchange | A question got a real answer (honest "not in your records" or failed lookups are **not** stored, so they can't come back as facts) | Recall questions only ("did you…", "what did you tell me…", "earlier", "yesterday"), so old answers don't distract ordinary ones. "Yesterday" filters by date |
 | Previous exchange | Same | A follow-up starting with "and", "what about", "how about" within `FOLLOW_UP_MINUTES`; it is combined with the previous question for routing and search, and shown to the model. For weather, a newly named place replaces the old one ("what about in Mumbai?") |
 
-Entries older than `MEMORY_RETENTION_DAYS` are deleted at startup; "forget that" and
-"forget everything" delete on request. Knowledge search also refuses to answer when a
+**Dates and reminders** (`brain/schedule.py`). A note naming a date or time is stored with
+it resolved ("meeting with Jay tomorrow at 7am" → "meeting with Jay on Saturday 10 October
+at 7:00 AM"), so it stays true on later days, and gets a row in the `schedule` table (due
+time, the note without its date words, announced flag). Schedule questions list that
+table's rows for a day; timed rows are announced once when due, between turns.
+
+Notes are kept until the user deletes them. Exchanges older than `MEMORY_RETENTION_DAYS`
+are deleted at startup; "forget that" and "forget everything" delete on request.
+When a note and a past exchange both match, the note ranks first. Knowledge search also refuses to answer when a
 meaningful word of the question appears in none of the matching records ("where is my
 car key" is not answered from a car record), so such questions fall through to memory
 or to an honest "not found".
@@ -203,29 +209,12 @@ or to an honest "not found".
 | Models never phone home | Whisper loads with `local_files_only=True` (without it, faster-whisper contacts huggingface.co at every start); the LLM and embedding models are plain local files; `run.sh` also sets `HF_HUB_OFFLINE=1` |
 | Online moments are visible | The indicator shows `ONLINE` only while the gateway is in use |
 
-## Wake phrase
+## Observability
 
-There is no wake-word model: `MicInput` transcribes speech with the same Whisper model
-used for requests, and `brain/wake.py` checks the text.
-
-```mermaid
-stateDiagram-v2
-    [*] --> Asleep
-    Asleep --> Asleep: speech without wake phrase (discarded)
-    Asleep --> Awake: "Hey Sam[, request]"
-    Awake --> Awake: request (no wake phrase needed)
-    Awake --> Asleep: CONVERSATION_TIMEOUT of silence
-    Awake --> Asleep: "that's all" / "stop listening" / "thank you"
-    Awake --> Asleep: mute switch
-```
-
-| Rule | Detail |
-|---|---|
-| Match | The transcript must **start** with a greeting and the name ("Hey Sam", "Hi Sam", "OK Sam"), and the name must be addressed: followed by a pause or a request word ("Hey Sam what's…"). "Sam is coming for dinner", "Hey, Sam called…" and "I saw Sam…" do not wake it |
-| Cost while asleep | Only the first `WAKE_CHECK_SECONDS` (3 s) of each utterance are transcribed; the full utterance is transcribed only after a match |
-| Accuracy | Whisper is given `hotwords` (wake name, EMI, PAN, Aadhaar, default place), which fixed "EMI" being heard as "UI" with `tiny.en` and caused no false wakes on silence, noise, or unrelated speech in testing |
-| Privacy | Ignored speech is transcribed in memory and discarded; its text is never printed, logged, or stored |
-| Never exits by voice | "Exit", "stop" and "goodbye" end the conversation; the program stops only with `Ctrl+C` |
+Each turn is a trace of timed spans (listen, stt, knowledge, memory, online_lookup,
+llm_generation, speak) with its route and reply time, stored on the device and shown on the
+console, by `scripts/traces.py`, and on a localhost dashboard. Record contents, prompts and
+audio are never traced. See [observability.md](observability.md).
 
 ## Pi 4 performance decisions
 
@@ -234,14 +223,13 @@ stateDiagram-v2
 | Qwen3-0.6B at Q4_K_M (~400 MB) | Whole pipeline peaks at about 1.1 GB, leaving over 2 GB free on a 4 GB Pi |
 | Prebuilt baseline-ARMv8 llama.cpp wheel | No 20–40 minute compile on the Pi, and no `dotprod`/`i8mm`/SVE instructions that the Cortex-A72 lacks (verified by disassembly) |
 | `/no_think` + ChatML | Qwen3 otherwise writes a hidden reasoning trace first, costing seconds per reply |
-| `LLM_MAX_TOKENS=128` | Caps worst-case reply generation time |
+| `LLM_MAX_TOKENS=80`, `MAX_REPLY_WORDS=50` | Caps reply generation time and spoken length |
 | Whisper `tiny.en`, greedy decoding on Pi | Several times faster than `base` with beam 5; English-only models are more accurate for English |
 | 16 kHz native capture | Avoids resampling (and importing scipy) when the mic supports it |
-| Models loaded once at startup | Loading takes seconds; per-request loading would dominate latency |
+| Models loaded once at startup; the system prompt is processed during start-up (`LocalLLM.warm_up`) | Loading takes seconds; llama.cpp then reuses the processed prompt, so the first answer on a Pi 4 takes ~8 s instead of ~23 s |
 | Stages run sequentially | STT and LLM each get all four cores instead of competing |
 | Lazy imports | Text mode and tests run without audio libraries; startup loads only what is used |
 | Memory: FTS5 + int8 MiniLM embeddings, NumPy similarity, top 3 items | ~90 MB RAM and ~1 ms per question for 94% vs 79% paraphrase recall; no vector database; only relevant items reach the prompt |
-| Wake phrase via Whisper, first 3 s only | No extra model in RAM; room conversation costs one short `tiny.en` pass per utterance instead of a full transcription |
 
 ## Extension points
 
@@ -271,11 +259,6 @@ enforces the allowlist, caches, reuses stale data when offline, and is replaced 
 in tests), and return `LookupResult(source, text, data)`. Add an `ONLINE_<KIND>` switch in
 `config.py`. Keep all networking code in this file, send only `LookupRequest` fields, and
 do any computation on the result locally.
-
-### Different wake phrase
-
-Set `WAKE_PHRASE`; no download or training is needed. Sleep phrases and polite words
-are in `SLEEP_PHRASES` and `POLITE_WORDS` in `brain/wake.py`.
 
 ### New input source
 

@@ -15,7 +15,8 @@
     "bp_tablet": "I took my blood pressure tablet at 8 am",
     "book": "Priya recommended the book Atomic Habits",
     "charger": "my laptop charger is in the office drawer",
-    "promise": "I promised Arjun I would send the slides by Thursday"
+    "promise": "I promised Arjun I would send the slides by Thursday",
+    "meeting_jay": "I have a meeting with Jay on Saturday 10 October at 7:00 AM"
   },
   "queries": [
     {"q": "where did I park?", "expect": "parking", "kind": "exact"},
@@ -52,6 +53,9 @@
     {"q": "which level did I leave the car on?", "expect": "parking", "kind": "paraphrase"},
     {"q": "what time is the dentist?", "expect": "dentist", "kind": "exact"},
     {"q": "who borrowed my drill?", "expect": "drill", "kind": "paraphrase"},
+    {"q": "Where did I park my car?", "expect": "parking", "kind": "paraphrase"},
+    {"q": "When is my meeting with Jay?", "expect": "meeting_jay", "kind": "exact"},
+    {"q": "What time do I meet Jay?", "expect": "meeting_jay", "kind": "paraphrase"},
 
     {"q": "where are my glasses?", "expect": null, "kind": "unrelated"},
     {"q": "when is my wife's birthday?", "expect": null, "kind": "near-miss"},
@@ -65,6 +69,8 @@
     {"q": "what did Priya say about the movie?", "expect": null, "kind": "near-miss"},
     {"q": "tell me a joke", "expect": null, "kind": "unrelated"},
     {"q": "what is the gas bill amount?", "expect": null, "kind": "unrelated"},
-    {"q": "where did I put my headphones?", "expect": null, "kind": "unrelated"}
+    {"q": "where did I put my headphones?", "expect": null, "kind": "unrelated"},
+    {"q": "When is my meeting with Ravi?", "expect": null, "kind": "near-miss"},
+    {"q": "Where did I park my bike?", "expect": null, "kind": "near-miss"}
   ]
 }

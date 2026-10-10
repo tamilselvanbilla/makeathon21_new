@@ -45,7 +45,7 @@ keeps working with the network cable unplugged.
 | Online calls limited to factual lookups | ✅ Done | Weather (Open-Meteo), **share market** (Yahoo Finance prices, AMFI fund NAVs) and **news** (The Hindu, BBC RSS). Only public identifiers leave the device (a place, ticker symbols, fund codes, a feed address); holdings, topics and questions stay local, and all arithmetic is done on the device. Each feature can be switched off |
 | Honest fallback instead of guessing | 🟡 Basic | `brain/policy.py`; signal-based fallback is planned |
 | Working demo in a human-potential domain | ✅ Memory & recall | Personal records (`knowledge_base/`), notes ("remember that I parked on B2"), past conversations ("what did you tell me about my EMI?") and follow-ups ("and my wife's?"), all stored on the device. Hybrid search (keywords + a 23 MB embedding model) finds paraphrases ("power tool", "travel documents"); answers found only by meaning are hedged |
-| Continuous sensing with **wake word** | ✅ Done | "Hey Sam" spotted in Whisper transcripts (a greeting is required, so talk *about* a Sam doesn't wake it) (no wake-word model, MIT licence); after waking, follow-up questions need no wake phrase until 30 s of silence or "that's all" |
+| Continuous sensing with **wake word** | ⏳ Removed | Every utterance is treated as a request; a wake-word engine is to be added (e.g. Vosk keyword spotting) |
 | **Physical mute switch** | ⏳ Next | Interface and software switch done; GPIO driver planned |
 | **Visible listening light** | ⏳ Next | All states implemented, printed to the console; LED driver planned |
 
@@ -86,21 +86,22 @@ the tests. For each step explained, manual installation, and troubleshooting, se
 | `scripts/run.sh --text` | Type requests; ideal over SSH or without a microphone |
 | `scripts/run.sh --no-tts` | Voice in, printed replies out |
 | `scripts/run.sh --offline` | Disable every online lookup |
-| `scripts/run.sh --no-wake-word` | Treat any speech as a request (no wake phrase) |
 | `scripts/run.sh --list-mics` | List audio devices and their indexes |
+| `.venv/bin/python scripts/traces.py serve` | Trace dashboard on http://127.0.0.1:8765 (also `list`, `show last`, `stats`); see [observability](docs/observability.md) |
 | `scripts/run.sh --mic-test` | Record 5 seconds to `audio/test.wav` |
 | `scripts/run.sh --list-speakers` | List audio outputs (Pi 4 aux jack: `plughw:CARD=Headphones`) |
-| `scripts/run.sh --speaker-test` | Speak a test phrase through `AUDIO_OUTPUT_DEVICE` |
+| `scripts/run.sh --speaker-test` | Speak a test phrase through the selected speaker |
 
 On start-up the assistant introduces itself: *"Hello John, I'm Sam, your private assistant.
-Say "Hey Sam" to start."*
+Ask me anything."*
 
 Try asking:
 
 - "What is my monthly income?" (answered locally from `knowledge_base/personal_data.json`)
-- "Hey Sam, what's the weather in Bengaluru?" (only "Bengaluru" and "today" go online; the console shows `[ONLINE]` and `[LOCAL]` steps)
-- then, without the wake phrase: "Do I need an umbrella tomorrow?", and finally "That's all, thanks." to end the conversation
+- "What's the weather in Bengaluru?" (only "Bengaluru" and "today" go online; the console shows `[ONLINE]` and `[LOCAL]` steps)
+- then a follow-up: "And tomorrow?"
 - "Remember that I parked on level B2" … later, even after a restart: "Where did I park?"
+- "Remind me to call mom at 6 pm" / "I have a meeting with Jay tomorrow at 7am" → "yes"; then "What's my schedule tomorrow?"
 - "What is my monthly income?" then "And my wife's?"; later "What did you tell me about my wife's income?"
 - "Forget that" / "Forget everything"
 - "How are my investments doing today?" (only `INFY.NS`, `^NSEI`, `^BSESN` and fund code `120377` go online; values and gains are computed on the device)
@@ -123,10 +124,12 @@ docs/
   setup.md                        detailed installation, Pi notes, troubleshooting
   configuration.md                every environment variable
   architecture.md                 pipeline, modules, privacy boundary, extension points
+  observability.md                conversation traces: what is recorded, CLI, dashboard
 scripts/
   setup.sh                        one-time setup (Pi OS / Debian / macOS)
   run.sh                          start the assistant with model hubs forced offline
   mic_test.py                     record a test clip
+  traces.py                       view conversation traces: list, show, stats, serve (dashboard)
 src/
   main.py                         entry point
   companion/
@@ -135,8 +138,9 @@ src/
     pipeline.py                   turn loop, microphone and text input
     online_gateway.py             the ONLY module allowed network access
     telemetry.py                  JSON timing logs (no prompts or audio)
+    tracing.py                    per-turn traces stored on the device
     audio/   capture.py, stt.py
-    brain/   llm.py, router.py, prompts.py, policy.py, knowledge.py, memory.py, wake.py
+    brain/   llm.py, router.py, prompts.py, policy.py, knowledge.py, memory.py
     device/  indicator.py, mute.py, tts.py
 knowledge_base/personal_data.json synthetic personal records used in the demo
 tests/                            unit tests (run without models or audio hardware)
@@ -155,11 +159,15 @@ tests/                            unit tests (run without models or audio hardwa
    additionally sets `HF_HUB_OFFLINE=1`. A traced session made no connections except the
    two Open-Meteo calls for a weather question.
 5. **Memory stays on the device and can be erased.** Notes and past questions and answers
-   are kept as text in `data/memory.sqlite3` (git-ignored), deleted after 30 days, and
+   are kept as text in `data/memory.sqlite3` (git-ignored); past exchanges are deleted after
+   30 days, notes and reminders when the user asks; everything can be
    erased on request ("forget that", "forget everything"). Audio and ignored speech are
    never stored; `MEMORY=0` keeps memory for the current session only.
 6. **Logs hold timings, not content.** `logs/assistant.log` records events and durations,
-   never prompts, transcripts, or audio.
+   never prompts, transcripts, or audio. Conversation traces (`data/traces.sqlite3`) add
+   routes, step timings and token counts, plus the question and reply text unless
+   `TRACE_CONTENT=0`; never record contents, prompts or audio. They stay on the device,
+   expire after 30 days and are erased by "forget everything".
 
 Points 2 and 3 are enforced by tests in `tests/test_privacy_and_control.py`.
 
@@ -170,6 +178,7 @@ Points 2 and 3 are enforced by tests in `tests/test_privacy_and_control.py`.
 | [docs/setup.md](docs/setup.md) | Install on a Pi or laptop, step by step, and fix problems |
 | [docs/configuration.md](docs/configuration.md) | Tune models, microphone sensitivity, or performance |
 | [docs/architecture.md](docs/architecture.md) | Understand the pipeline or add a feature |
+| [docs/observability.md](docs/observability.md) | See why a reply was slow or how it was answered: per-turn traces, CLI and dashboard |
 | [docs/benchmarks.md](docs/benchmarks.md) | See how the language and memory models were chosen, and re-run the benchmarks on the Pi |
 
 ## Roadmap

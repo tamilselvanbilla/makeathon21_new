@@ -72,9 +72,8 @@ def main() -> None:
     queries = data["queries"]
 
     memory = ConversationMemory(top_k=len(note_ids))
-    for text in note_texts:
-        memory.add_note(text)
-    text_to_id = dict(zip(note_texts, note_ids))
+    # Notes are stored with relative dates resolved, so map them back by the stored text.
+    text_to_id = {memory.add_note(text)[0]: note_id for text, note_id in zip(note_texts, note_ids)}
     lexical = {item["q"]: [text_to_id[m.question] for m in memory.search(item["q"])] for item in queries}
     # Per question and note: does the note contain all / some / none of the question's words?
     coverage = {item["q"]: {text_to_id[t]: c for t, c in memory.coverage(item["q"]).items()} for item in queries}

@@ -227,23 +227,6 @@ part of its name, e.g. `MIC_DEVICE=USB scripts/run.sh`.
 | `--text` | Type requests instead of speaking |
 | `--no-tts` | Print replies instead of speaking |
 | `--offline` | Disable all online lookups |
-| `--no-wake-word` | Treat any speech as a request |
-
-### Wake phrase and conversation
-
-The console shows `[LED] IDLE` while the device waits for the wake phrase. Speech
-that doesn't start with it is dropped (`[IDLE] speech ignored`), and its text is never
-shown or kept.
-
-1. Say **"Hey Sam, what is my EMI?"** in one breath (or "Hey Sam", then the
-   question). You'll see `[WAKE] 'hey sam' heard` and `[LED] LISTENING`. Always use a
-   greeting ("Hey/Hi/OK Sam"): "Sam, …" alone is ignored so that conversations
-   *about* someone called Sam don't wake the device.
-2. Ask follow-ups **without** the wake phrase: "And when does my car insurance expire?"
-3. Say **"That's all, thanks"**, or stay quiet for 30 s: `[SLEEP] ...` and back to `IDLE`.
-
-If it doesn't wake, check what Whisper heard: run with `--no-wake-word` and look at the
-`You:` line. Pick a phrase it spells consistently (configuration.md, *Wake phrase*).
 
 ### Memory
 

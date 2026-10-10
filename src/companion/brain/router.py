@@ -20,6 +20,12 @@ PLACE_AFTER_PREPOSITION = re.compile(
     r"(?=\s+(?:today|tomorrow|tonight|now|right|this|and|or|but|so|should|will|is|to|with|like)\b|\s*[?.!,]|\s*$)",
     re.IGNORECASE,
 )
+# Old names Open-Meteo resolves to the wrong place ("Bangalore" -> Bangalore Town,
+# Pakistan; "Bombay" -> a US town), checked against its geocoding API.
+PLACE_ALIASES = {
+    "bangalore": "Bengaluru", "bombay": "Mumbai", "madras": "Chennai", "calcutta": "Kolkata",
+    "mysore": "Mysuru", "trivandrum": "Thiruvananthapuram", "cochin": "Kochi", "pondicherry": "Puducherry",
+}
 NOT_A_PLACE = frozenset({"a", "an", "the", "my", "me", "us", "you", "it", "this", "that", "today", "tomorrow", "now"})
 
 
@@ -41,7 +47,7 @@ def extract_place(text: str) -> str | None:
     for match in PLACE_AFTER_PREPOSITION.finditer(text):
         place = match.group(1).strip(" .'-")
         if place and place.split()[0].casefold() not in NOT_A_PLACE:
-            return place.title()
+            return PLACE_ALIASES.get(place.casefold(), place.title())
     return None
 
 

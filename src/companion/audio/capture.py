@@ -6,6 +6,7 @@ without hardware.
 """
 
 import re
+from collections import deque
 from contextlib import closing
 from typing import Callable, Iterable, Iterator
 
@@ -16,6 +17,7 @@ from ..config import CaptureConfig
 TARGET_RATE = 16_000
 FRAME_SAMPLES = 1280
 FRAME_SECONDS = FRAME_SAMPLES / TARGET_RATE  # 0.08 s
+PRE_ROLL_SECONDS = 0.5  # audio kept from just before speech starts
 
 
 def record_command(
@@ -25,30 +27,40 @@ def record_command(
 ) -> np.ndarray:
     """Record until speech is followed by silence.
 
+    Only the last `PRE_ROLL_SECONDS` before speech starts are kept (so the first
+    syllable isn't clipped); earlier silence or room noise never reaches Whisper,
+    which on a Pi made transcription take 8-16 s. Speech must be louder than
+    SPEECH_RMS_THRESHOLD for SPEECH_ONSET_FRAMES frames in a row, so a click or
+    bump doesn't start a recording. MAX_RECORD_SECONDS counts from speech start.
+
     Returns float32 mono 16 kHz audio, or an empty array when no speech started
     within `max_wait_seconds` or the frames ran out (muted; audio is discarded).
     """
     silence_frames_needed = max(1, round(config.silence_seconds / FRAME_SECONDS))
+    onset_frames = max(1, config.speech_onset_frames)
+    pre_roll: deque[np.ndarray] = deque(maxlen=onset_frames + round(PRE_ROLL_SECONDS / FRAME_SECONDS))
     chunks: list[np.ndarray] = []
-    silent_frames = 0
-    speech_detected = False
-    elapsed = 0.0
+    loud_run = silent_frames = 0
+    waited = spoken = 0.0
 
     for frame in frames:
-        chunks.append(frame)
-        elapsed += FRAME_SECONDS
         rms = float(np.sqrt(np.mean(frame.astype(np.float32) ** 2)))
-        if rms >= config.speech_rms_threshold:
-            speech_detected = True
-            silent_frames = 0
-        elif speech_detected:
-            silent_frames += 1
-            if silent_frames >= silence_frames_needed:
-                break
-        if speech_detected and elapsed >= config.max_record_seconds:
+        loud = rms >= config.speech_rms_threshold
+        if not chunks:  # waiting for speech
+            waited += FRAME_SECONDS
+            pre_roll.append(frame)
+            loud_run = loud_run + 1 if loud else 0
+            if loud_run >= onset_frames:
+                chunks = list(pre_roll)
+            elif waited >= max_wait_seconds:
+                return np.empty(0, dtype=np.float32)
+            continue
+
+        chunks.append(frame)
+        spoken += FRAME_SECONDS
+        silent_frames = 0 if loud else silent_frames + 1
+        if silent_frames >= silence_frames_needed or spoken >= config.max_record_seconds:
             break
-        if not speech_detected and elapsed >= max_wait_seconds:
-            return np.empty(0, dtype=np.float32)
     else:
         return np.empty(0, dtype=np.float32)  # stream ended: muted mid-recording
 

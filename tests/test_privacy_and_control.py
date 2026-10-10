@@ -24,27 +24,29 @@ from companion.brain.memory import (  # noqa: E402
     note_answer,
     parse_memory_command,
 )
-from companion.brain.prompts import NO_RECORDS, NOT_IN_RECORDS_ANSWER, build_system_prompt, build_welcome  # noqa: E402
+from companion.brain.prompts import NO_NOTE_ANSWER, NO_RECORDS, NOT_IN_RECORDS_ANSWER, build_system_prompt, build_welcome  # noqa: E402
 from companion.brain.llm import clean_model_response  # noqa: E402
 from companion.audio.capture import pick_microphone, record_command  # noqa: E402
-from companion.audio.stt import looks_like_noise, reliable  # noqa: E402
+from companion.audio.stt import echoes_prompt, looks_like_noise, reliable  # noqa: E402
 from companion.brain.router import Intent, extract_place, parse_lookup, route  # noqa: E402
 from companion.config import CaptureConfig  # noqa: E402
 from companion.device.indicator import ConsoleIndicator, IndicatorState  # noqa: E402
 from companion.device.mute import SoftwareMuteSwitch  # noqa: E402
-from companion.device.tts import EspeakSpeaker  # noqa: E402
+from companion.device.tts import EspeakSpeaker, TTS_RATE  # noqa: E402
 from companion.brain.market import Portfolio  # noqa: E402
 from companion.brain.news import news_request  # noqa: E402
 from companion.online_gateway import (  # noqa: E402
     FORECAST_URL,
     GEOCODING_URL,
+    best_place,
     LookupRequest,
     LookupUnavailable,
     OnlineGateway,
     check_host_allowed,
 )
-from companion.brain.wake import WakePhrase, is_sleep_command  # noqa: E402
 from companion.pipeline import Assistant, MicInput  # noqa: E402
+from companion.telemetry import timed_event  # noqa: E402
+from companion.tracing import Tracer, annotate, span  # noqa: E402
 
 NETWORK_MODULES = {"requests", "httpx", "urllib3", "aiohttp", "socket", "http.client", "urllib.request"}
 
@@ -184,16 +186,6 @@ class FakeTranscriber:
         return self.texts.pop(0) if len(self.texts) > 1 else self.texts[0]
 
 
-def conversation(transcripts, seconds=(1,), muted=False, timeout=30):
-    capture = FakeCapture(*seconds)
-    transcriber = FakeTranscriber(*transcripts)
-    indicator = RecordingIndicator()
-    source = MicInput(
-        capture, transcriber, SoftwareMuteSwitch(muted), indicator, WakePhrase("hey sam"), timeout
-    )
-    return source, capture, transcriber, indicator
-
-
 def quietly(fn, *args):
     with contextlib.redirect_stdout(io.StringIO()) as out:
         result = fn(*args)
@@ -260,7 +252,7 @@ def make_portfolio():
     return Portfolio.load(HOLDINGS, "John", SYMBOLS_FILE)
 
 
-def make_assistant(llm=None, gateway=None, memory=None, portfolio=None):
+def make_assistant(llm=None, gateway=None, memory=None, portfolio=None, tracer=None):
     indicator = RecordingIndicator()
     speaker = FakeSpeaker()
     assistant = Assistant(
@@ -271,6 +263,7 @@ def make_assistant(llm=None, gateway=None, memory=None, portfolio=None):
         portfolio=portfolio,
         indicator=indicator,
         speaker=speaker,
+        tracer=tracer,
     )
     return assistant, indicator, speaker
 
@@ -302,6 +295,15 @@ class PrivacyTests(unittest.TestCase):
             with self.assertRaises(LookupUnavailable):
                 lookup(request)
         self.assertEqual(fetch.sent, [])
+
+    def test_best_place_prefers_home_country_then_population(self):
+        results = [
+            {"name": "Bangalore Town", "country_code": "PK"},
+            {"name": "Mysore Road Tolgate", "country_code": "IN"},
+            {"name": "Mysuru", "country_code": "IN", "population": 920550},
+        ]
+        self.assertEqual(best_place(results, "IN")["name"], "Mysuru")
+        self.assertEqual(best_place(results[:1], "IN")["name"], "Bangalore Town")  # nothing better available
 
     def test_only_allowlisted_hosts(self):
         with self.assertRaises(LookupUnavailable):
@@ -360,7 +362,8 @@ class ReasoningTests(unittest.TestCase):
             LookupRequest("weather", "New York", "tomorrow"),
         )
         self.assertEqual(parse_lookup("will it rain today", "Bengaluru"), LookupRequest("weather", "Bengaluru"))
-        self.assertEqual(extract_place("weather in Mysore and should I go for a run?"), "Mysore")
+        self.assertEqual(extract_place("weather in Mysore and should I go for a run?"), "Mysuru")  # old name mapped
+        self.assertEqual(extract_place("What is a weather in Bangalore today?"), "Bengaluru")
         self.assertIsNone(extract_place("should I go for a run"))
 
     def test_rain_matches_whole_words_only(self):
@@ -479,6 +482,11 @@ class SpeechFilterTests(unittest.TestCase):
         self.assertFalse(looks_like_noise("Can you give me what are the medications I am taking daily?"))
         self.assertFalse(looks_like_noise("no no no no"))  # short answers are kept
 
+    def test_hint_word_echo_is_dropped(self):
+        self.assertTrue(echoes_prompt("EMI PAN Aadhaar", "EMI PAN Aadhaar Bengaluru"))
+        self.assertFalse(echoes_prompt("What is my EMI?", "EMI PAN Aadhaar Bengaluru"))
+        self.assertFalse(echoes_prompt("What is my PAN card number?", "EMI PAN Aadhaar Bengaluru"))
+
     def test_whisper_quality_signals(self):
         segment = lambda **kw: SimpleNamespace(**{"no_speech_prob": 0.1, "avg_logprob": -0.3, "compression_ratio": 1.2, **kw})  # noqa: E731
         self.assertTrue(reliable(segment()))
@@ -487,18 +495,19 @@ class SpeechFilterTests(unittest.TestCase):
 
 
 class PromptTests(unittest.TestCase):
-    def test_system_prompt_describes_role_records_and_family(self):
+    def test_system_prompt_describes_role_and_records(self):
         kb = KnowledgeBase(load_knowledge())
         prompt = build_system_prompt(kb.primary_user, kb.currency, "Sam", kb.family)
         for part in ("personal assistant for John", "insurance policies", "medical and health records",
-                     "identity documents", "(wife Jane, son Robert)", "use only Knowledge and Memory",
+                     "identity documents", "use only Knowledge and Memory",
                      "general questions", "identity numbers only when asked"):
             self.assertIn(part, prompt)
+        self.assertIn("Prior assistant replies in Memory are conversation history, not verified facts", prompt)
+        self.assertNotIn("wife Jane", prompt)
+        self.assertNotIn("son Robert", prompt)
 
-    def test_welcome_names_the_assistant_and_how_to_wake_it(self):
-        welcome = build_welcome("Sam", "John", "hey sam")
-        self.assertEqual(welcome, 'Hello John, I\'m Sam, your private assistant. Say "Hey Sam" to start.')
-        self.assertTrue(build_welcome("Sam", "John", None).endswith("Ask me anything."))
+    def test_welcome_names_the_assistant(self):
+        self.assertEqual(build_welcome("Sam", "John"), "Hello John, I'm Sam, your private assistant. Ask me anything.")
 
 
 class PipelineTests(unittest.TestCase):
@@ -510,6 +519,43 @@ class PipelineTests(unittest.TestCase):
         self.assertIn("85000", llm.calls[0])
         self.assertIn(IndicatorState.THINKING, indicator.states)
         self.assertNotIn(IndicatorState.ONLINE, indicator.states)
+
+    def test_long_replies_are_cut_to_fifty_words_at_a_sentence(self):
+        long = "Your EMI is INR 9,200 a month. " + "You also hold Infosys shares and a mutual fund. " * 10
+        assistant, _, _ = make_assistant(llm=FakeLLM(long))
+        reply = assistant.respond("what is my emi amount")
+        self.assertLessEqual(len(reply.split()), 50)
+        self.assertTrue(reply.startswith("Your EMI is INR 9,200 a month.") and reply.endswith("."))
+
+    def test_word_limit_does_not_split_decimals_or_keep_unfinished_sentences(self):
+        cut = policy.limit_words("Your BMI is 25.5 and " + "very " * 60, 50)
+        self.assertEqual(len(cut.split()), 50)
+        self.assertTrue(cut.startswith("Your BMI is 25.5 and very") and cut.endswith("very."))
+        self.assertEqual(policy.limit_words("Your BMI is 25.5. " + "Walk more " * 30, 50), "Your BMI is 25.5.")
+        self.assertEqual(policy.full_sentences("Your BMI is 25.5. You should eat better and"), "Your BMI is 25.5.")
+        self.assertEqual(policy.full_sentences("Your EMI is INR 9,200"), "Your EMI is INR 9,200.")
+        self.assertEqual(policy.full_sentences('You said "hi."'), 'You said "hi."')
+
+    def test_example_figure_is_allowed_when_a_record_holds_it(self):
+        llm = FakeLLM("Your bond has a face value of INR 50,000.")
+        assistant, _, _ = make_assistant(llm=llm)
+        assistant.knowledge = KnowledgeBase({"financial": [{"owner": "John", "record_type": "bond", "face_value": 50000}]})
+        self.assertEqual(assistant.respond("what is my bond face value"), "Your bond has a face value of INR 50,000.")
+
+    def test_emi_question_sends_only_the_loan_record(self):
+        llm = FakeLLM()
+        assistant, _, _ = make_assistant(llm=llm)
+        assistant.respond("What is my E.M.I. amount?")
+        self.assertIn("9200", llm.calls[0])
+        self.assertNotIn("INFY", llm.calls[0])
+
+    def test_medicine_answer_spoken_as_the_user_is_turned_to_you(self):
+        self.assertEqual(policy.as_second_person("I am taking Sample medication."), "You are taking Sample medication.")
+        self.assertEqual(policy.as_second_person("I take it daily."), "You take it daily.")
+        self.assertEqual(policy.as_second_person("I am 175 cm tall."), "You are 175 cm tall.")
+        self.assertEqual(policy.as_second_person("I cannot find that."), "I cannot find that.")
+        self.assertEqual(policy.as_second_person("I am not sure."), "I am not sure.")
+        self.assertEqual(policy.as_second_person("I'm sorry, that isn't recorded."), "I'm sorry, that isn't recorded.")
 
     def test_unavailable_lookup_is_honest_and_skips_the_model(self):
         llm = FakeLLM()
@@ -544,8 +590,16 @@ class PipelineTests(unittest.TestCase):
     def test_personal_question_without_records_skips_the_model(self):
         llm = FakeLLM()
         assistant, _, _ = make_assistant(llm=llm)
+        self.assertEqual(NOT_IN_RECORDS_ANSWER, "No matched data found.")
         self.assertEqual(assistant.respond("what is my blood group"), NOT_IN_RECORDS_ANSWER)
         self.assertEqual(assistant.respond("when does my passport expire"), NOT_IN_RECORDS_ANSWER)
+        self.assertEqual(llm.calls, [])
+
+    def test_removed_family_data_is_not_answered_from_the_model(self):
+        llm = FakeLLM()
+        assistant, _, _ = make_assistant(llm=llm)
+        assistant.knowledge = KnowledgeBase(load_knowledge())
+        self.assertEqual(assistant.respond("what is my wife's employer"), NOT_IN_RECORDS_ANSWER)
         self.assertEqual(llm.calls, [])
 
     def test_general_question_without_records_still_reaches_the_model(self):
@@ -553,6 +607,18 @@ class PipelineTests(unittest.TestCase):
         assistant, _, _ = make_assistant(llm=llm)
         self.assertEqual(assistant.respond("what is the capital of France"), "Paris.")
         self.assertIn(f"Knowledge: {NO_RECORDS}", llm.calls[0])
+
+    def test_context_debug_prints_what_the_model_receives(self):
+        assistant, _, _ = make_assistant()
+        assistant.debug_context = True
+        _, out = quietly(assistant.respond, "what is my monthly income")
+        self.assertIn("[CONTEXT] records sent to the model:", out)
+        self.assertIn("Monthly Income: 85000", out)
+
+    def test_copied_prompt_example_is_not_presented_as_data(self):
+        assistant, _, _ = make_assistant(llm=FakeLLM("A. Your monthly salary is INR 50,000."))
+        reply, _ = quietly(assistant.respond, "A")
+        self.assertEqual(reply, "Sorry, I didn't catch that. Could you say it again?")
 
     def test_uncertain_model_answer_is_spoken_but_not_remembered(self):
         memory = ConversationMemory(clock=Clock())
@@ -624,8 +690,13 @@ class MemoryTests(unittest.TestCase):
             path = Path(folder) / "memory.sqlite3"
             ConversationMemory(path, clock=self.clock).add_note("I parked on level B2")
             self.assertIn("B2", ConversationMemory(path, clock=self.clock).context_for("where did I park"))
+            self.memory = ConversationMemory(path, clock=self.clock)
+            self.memory.add_turn("what is my EMI", "Your EMI is INR 9200.")
             self.clock.advance(days=31)
-            self.assertEqual(ConversationMemory(path, clock=self.clock).context_for("where did I park"), "")
+            restarted = ConversationMemory(path, clock=self.clock)
+            # Notes stay until the user deletes them; past turns expire.
+            self.assertIn("B2", restarted.context_for("where did I park"))
+            self.assertEqual(restarted.context_for("what did you tell me about my EMI?"), "")
 
 
 class ConceptEmbedder:
@@ -749,6 +820,219 @@ class AssistantMemoryTests(unittest.TestCase):
         self.assertEqual(geocoded, ["Bengaluru", "Mumbai"])
 
 
+class NoteAndScheduleTests(unittest.TestCase):
+    """The cases from a Raspberry Pi session where notes were lost or not recognised."""
+
+    def setUp(self):
+        self.clock = Clock(datetime(2026, 10, 9, 21, 15))  # Friday evening
+        self.memory = ConversationMemory(clock=self.clock)
+        self.llm = FakeLLM()
+        self.assistant, _, self.speaker = make_assistant(llm=self.llm, memory=self.memory)
+
+    def say(self, text):
+        return quietly(self.assistant.respond, text)[0]
+
+    def test_where_did_i_park_finds_a_note_without_the_word_park(self):
+        self.say("Remember that I have got my car on level B2.")
+        self.assertEqual(self.say("Where did I park my car?"), "On 9 October you told me that you have got your car on level B2.")
+
+    def test_note_outranks_a_past_turn_repeating_it(self):
+        self.say("Remember that I have got my car on level B2.")
+        self.say("Where did I park my car?")  # stored as a turn
+        self.assertEqual(self.say("Where did I park my car?"), "On 9 October you told me that you have got your car on level B2.")
+
+    def test_forget_that_removes_the_note_just_discussed_and_its_quotes(self):
+        self.say("Remember that my gym locker code is 4512")
+        self.say("What is my gym locker code?")  # answer quoting the note is stored as a turn
+        self.assertEqual(self.say("Forget that"), "Okay, I've forgotten that your gym locker code is 4512.")
+        self.assertNotIn("4512", self.say("What is my gym locker code?"))
+        self.assertNotIn("4512", self.memory.context_for("what did you tell me about my gym locker code?"))
+
+    def test_where_is_my_thing_without_a_note_is_not_guessed(self):
+        self.assertEqual(self.say("Where is the spare key?"), NO_NOTE_ANSWER)
+        self.assertEqual(self.say("Where did I keep my glasses?"), NO_NOTE_ANSWER)
+        self.assertEqual(self.llm.calls, [])
+        self.say("Where is the Eiffel Tower?")  # a name: general knowledge, the model answers
+        self.assertEqual(len(self.llm.calls), 1)
+
+    def test_family_words_match_notes(self):
+        self.say("Remember that mom's birthday is on 12 March")
+        self.assertEqual(self.say("When is my mother's birthday?"), "On 9 October you told me that mom's birthday is on 12 March.")
+
+    def test_tasks_are_offered(self):
+        self.assertEqual(self.say("My wife asked me to buy vegetables on the way home"),
+                         "Do you want me to remember that your wife asked you to buy vegetables on the way home?")
+
+    def test_bare_remember_waits_for_the_content(self):
+        self.assertEqual(self.say("Please remember that."), "Sure. What should I remember?")
+        reply = self.say("meeting with Jay tomorrow at 7am.")
+        self.assertEqual(reply, "Okay, I'll remember: meeting with Jay on Saturday 10 October at 7:00 AM, and remind you then.")
+        self.assertEqual(self.say("When is my meeting with Jay?"),
+                         "On 9 October you told me: meeting with Jay on Saturday 10 October at 7:00 AM.")
+        self.assertEqual(self.say("When is the meeting?"), "Tomorrow, 10 October: meeting with Jay at 7:00 AM.")
+        self.assertEqual(self.llm.calls, [])
+
+    def test_remind_me_to(self):
+        reply = self.say("Remind me to call mom at 6 pm tomorrow")
+        self.assertEqual(reply, "Okay, I'll remember that you need to call mom on Saturday 10 October at 6:00 PM, and remind you then.")
+        self.assertEqual(self.say("Remind me"), "Sure. What should I remind you to do?")
+        self.assertIn("you need to buy milk", self.say("buy milk"))
+
+    def test_statement_with_a_date_is_offered_and_saved_on_yes(self):
+        self.assertEqual(self.say("I have a meeting with Jay tomorrow."), "Do you want me to remember that you have a meeting with Jay tomorrow?")
+        self.assertEqual(self.say("Yes please"), "Okay, I'll remember that you have a meeting with Jay on Saturday 10 October.")
+        self.assertEqual(self.llm.calls, [])
+
+    def test_statement_declined_or_ignored_is_not_saved(self):
+        self.say("I parked on level B2")
+        self.assertEqual(self.say("No"), "Okay, I won't remember it.")
+        self.say("I lent my drill to Ravi")
+        self.say("what is my EMI")  # moved on: answered normally
+        self.assertEqual(self.memory.search("who has my drill"), [])
+        self.assertEqual(len(self.llm.calls), 1)
+
+    def test_questions_are_not_saved_as_notes(self):
+        self.assertIsNone(parse_memory_command("Do you remember where I parked?"))
+        self.assertIsNone(parse_memory_command("remember where I parked?"))
+
+    def test_schedule_for_a_day(self):
+        self.say("Remember I have a meeting with Jay tomorrow at 7am")
+        self.say("Remind me to pay rent on Monday")
+        self.assertEqual(self.say("What is my schedule looks like tomorrow?"),
+                         "Tomorrow, 10 October: you have a meeting with Jay at 7:00 AM.")
+        self.assertEqual(self.say("Do I have any meetings today?"), "You have nothing noted for today, 9 October.")
+        self.assertEqual(self.say("What are my reminders?"),
+                         "Tomorrow, 10 October: you have a meeting with Jay at 7:00 AM. "
+                         "Monday, 12 October: you need to pay rent.")
+        # A question with a subject is answered from the note, not as a schedule.
+        self.assertIn("7:00 AM", self.say("What time is my meeting with Jay?"))
+
+    def test_due_reminder_is_announced_once(self):
+        self.say("Remind me to take my tablet in 10 minutes")
+        self.assertEqual(self.assistant.due_announcement(), "")
+        self.clock.advance(minutes=10)
+        self.assertEqual(self.assistant.due_announcement(), "Reminder: you need to take your tablet at 9:25 PM.")
+        self.assertEqual(self.assistant.due_announcement(), "")
+
+    def test_reminders_survive_a_restart(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "memory.sqlite3"
+            ConversationMemory(path, clock=self.clock).add_note("I have a meeting with Jay tomorrow at 7am")
+            self.clock.advance(hours=9)  # 6:15 next morning, device restarted
+            assistant, _, _ = make_assistant(memory=ConversationMemory(path, clock=self.clock))
+            self.assertEqual(assistant.briefing(), "Today you have: you have a meeting with Jay at 7:00 AM.")
+            self.clock.advance(minutes=45)
+            self.assertEqual(assistant.due_announcement(), "Reminder: you have a meeting with Jay at 7:00 AM.")
+            self.assertEqual(ConversationMemory(path, clock=self.clock).due_reminders(), [])
+
+    def test_model_cannot_claim_to_remember(self):
+        self.llm.reply = "Okay, I will keep this in mind."
+        reply = self.say("The plumber is coming on Monday")
+        self.assertEqual(reply, "I haven't saved that. Do you want me to remember that the plumber is coming on Monday?")
+        self.assertEqual(self.say("yes"), "Okay, I'll remember that the plumber is coming on Monday 12 October.")
+
+    def test_forget_removes_the_reminder(self):
+        self.say("Remind me to call mom in 5 minutes")
+        self.say("forget that")
+        self.clock.advance(minutes=5)
+        self.assertEqual(self.assistant.due_announcement(), "")
+
+
+class TracingTests(unittest.TestCase):
+    def run_session(self, *lines, tracer=None, source=None, llm=None):
+        tracer = tracer or Tracer()
+        assistant, _, _ = make_assistant(llm=llm, memory=ConversationMemory(clock=Clock()), tracer=tracer)
+        quietly(assistant.run, source or ScriptedInput(*lines))
+        return tracer
+
+    def test_spans_outside_a_turn_do_nothing(self):
+        with span("stt") as current:
+            annotate(x=1)
+        self.assertIsNone(current)
+
+    def test_nested_spans_and_timed_events(self):
+        tracer = Tracer()
+        with quietly_turn(tracer):
+            with span("outer"):
+                with timed_event("llm_generation", model="m"):
+                    annotate(completion_tokens=5)
+        trace = tracer.get(tracer.recent(1)[0]["id"])
+        outer, inner = trace["spans"]
+        self.assertEqual((outer["name"], inner["name"], inner["parent"]), ("outer", "llm_generation", 0))
+        self.assertEqual(inner["attrs"], {"model": "m", "completion_tokens": 5})
+
+    def test_each_turn_is_traced_with_route_and_steps(self):
+        tracer = self.run_session("what is my monthly income", "Remember that I parked on level B2", "what is my blood group")
+        turns = list(reversed(tracer.recent()))
+        self.assertEqual([t["route"] for t in turns], ["llm", "memory_remember", "not_in_records"])
+        self.assertEqual(turns[0]["input"], "what is my monthly income")
+        self.assertEqual(turns[0]["reply"], "Your monthly income is 85000 rupees.")
+        names = [s["name"] for s in tracer.get(turns[0]["id"])["spans"]]
+        self.assertEqual(names, ["knowledge", "memory", "speak"])
+        self.assertIsNotNone(turns[0]["response_ms"])
+
+    def test_traces_name_records_but_never_contain_them(self):
+        tracer = self.run_session("what is my monthly income")
+        trace = tracer.get(tracer.recent(1)[0]["id"])
+        knowledge = trace["spans"][0]["attrs"]
+        self.assertGreaterEqual(knowledge["records"], 1)
+        self.assertIn("financial/John", knowledge["sources"])
+        self.assertNotIn("85000", json.dumps(trace["spans"]))
+
+    def test_question_text_can_be_left_out(self):
+        tracer = self.run_session("what is my monthly income", tracer=Tracer(content=False))
+        turn = tracer.recent(1)[0]
+        self.assertEqual((turn["input"], turn["reply"], turn["route"]), ("", "", "llm"))
+
+    def test_forget_everything_deletes_traces(self):
+        tracer = self.run_session("what is my monthly income", "forget everything")
+        self.assertEqual([t["route"] for t in tracer.recent()], ["memory_forget_all"])
+
+    def test_silent_timeouts_are_dropped_and_ignored_speech_kept(self):
+        class Limited:  # MicInput never ends by itself
+            def __init__(self, source, turns):
+                self.source, self.turns = source, turns
+
+            def next_utterance(self):
+                self.turns -= 1
+                return self.source.next_utterance() if self.turns >= 0 else None
+
+        mic = MicInput(FakeCapture(0, 1.0, 1.0), FakeTranscriber("A", "what is my monthly income"),
+                       SoftwareMuteSwitch(), RecordingIndicator())
+        tracer = self.run_session(source=Limited(mic, 3))
+        turns = tracer.recent()
+        self.assertEqual([t["route"] for t in turns], ["llm", "ignored"])  # the silent wait is dropped
+        self.assertEqual(turns[1]["attrs"]["ignored"], "too short")
+        self.assertEqual(turns[1]["input"], "")  # ignored speech is never stored
+        spans = [s["name"] for s in tracer.get(turns[0]["id"])["spans"]]
+        self.assertEqual(spans[0], "listen")
+        self.assertGreater(turns[0]["response_ms"], 0)
+
+    def test_turn_failure_is_recorded(self):
+        class Broken:
+            def chat(self, system, user):
+                raise RuntimeError("boom")
+        tracer = self.run_session("what is my monthly income", llm=Broken())
+        self.assertEqual(tracer.recent(1)[0]["status"], "error")
+
+    def test_persists_and_reports_stats(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "traces.sqlite3"
+            self.run_session("what is my monthly income", "what is my blood group", tracer=Tracer(path))
+            stats = Tracer(path).stats()
+            self.assertEqual(stats["turns"], 2)
+            self.assertEqual(stats["routes"], {"llm": 1, "not_in_records": 1})
+            self.assertEqual(stats["steps"]["speak"]["n"], 2)
+            out = subprocess.run([sys.executable, str(ROOT / "scripts" / "traces.py"), "--file", str(path), "show", "last"],
+                                 capture_output=True, text=True, check=True).stdout
+            self.assertIn("route=not_in_records", out)
+            self.assertIn("knowledge", out)
+
+
+def quietly_turn(tracer):
+    return tracer.turn()
+
+
 class MarketTests(unittest.TestCase):
     def setUp(self):
         self.portfolio = make_portfolio()
@@ -827,6 +1111,25 @@ class MarketTests(unittest.TestCase):
         self.assertIn("[ONLINE] sent only symbols=['INFY.NS', '^NSEI', '^BSESN']", out)
         self.assertIn(IndicatorState.ONLINE, indicator.states)
 
+    def test_follow_up_on_a_new_topic_is_not_sent_down_the_market_route(self):
+        llm = FakeLLM("Your EMI is INR 9,200 a month.")
+        memory = ConversationMemory(clock=Clock())
+        assistant, _, _ = make_assistant(llm=llm, memory=memory, portfolio=self.portfolio)
+        quietly(assistant.respond, "how are my investments doing today?")
+        reply, _ = quietly(assistant.respond, "What about my EMI amount?")
+        self.assertEqual(reply, "Your EMI is INR 9,200 a month.")
+        self.assertIn("9200", llm.calls[-1])
+        self.assertNotIn("Previous question", llm.calls[-1])
+
+    def test_follow_up_naming_a_holding_stays_on_the_market_route(self):
+        llm = FakeLLM()
+        memory = ConversationMemory(clock=Clock())
+        assistant, _, _ = make_assistant(llm=llm, memory=memory, portfolio=self.portfolio)
+        quietly(assistant.respond, "how is the Nifty doing?")
+        reply, _ = quietly(assistant.respond, "and Infosys?")
+        self.assertIn("Infosys", reply)
+        self.assertEqual(llm.calls, [])
+
     def test_switched_off_market_is_answered_from_records(self):
         llm = FakeLLM("From your records, your Infosys shares were worth 18,800 rupees.")
         fetch = FakeFetch()
@@ -881,9 +1184,22 @@ class NewsTests(unittest.TestCase):
 
 class CommandRecordingTests(unittest.TestCase):
     def test_command_ends_after_silence(self):
-        audio = record_command(iter(frames(0, 1000, 1000, *[0] * 10, 1000)), CAPTURE, max_wait_seconds=6)
-        self.assertEqual(len(audio), 1280 * 13)  # stops after 10 silent frames (0.8 s)
+        audio = record_command(iter(frames(0, 1000, 1000, 1000, *[0] * 10, 1000)), CAPTURE, max_wait_seconds=6)
+        self.assertEqual(len(audio), 1280 * 14)  # pre-roll + 3 loud + 10 silent frames (0.8 s)
         self.assertEqual(audio.dtype, np.float32)
+
+    def test_brief_noise_spikes_do_not_start_a_recording(self):
+        spikes = frames(1000, 0, 0, 1000, 1000, 0, *[0] * 20)  # 1- and 2-frame bursts
+        self.assertEqual(record_command(iter(spikes), CAPTURE, max_wait_seconds=1.5).size, 0)
+
+    def test_only_half_a_second_before_speech_is_kept(self):
+        audio = record_command(iter(frames(*[100] * 60, 1000, 1000, 1000, *[0] * 10)), CAPTURE, max_wait_seconds=30)
+        # 4.8 s of room noise before speech: only the 6 frames of pre-roll + 3 onset frames survive
+        self.assertEqual(len(audio), 1280 * (9 + 10))
+
+    def test_max_record_counts_from_speech_start(self):
+        audio = record_command(iter(frames(*[0] * 100, *[1000] * 400)), CAPTURE, max_wait_seconds=30)
+        self.assertLessEqual(len(audio) / 16000, 15 + 0.8)  # 15 s of speech plus pre-roll
 
     def test_command_times_out_without_speech(self):
         audio = record_command(iter(frames(*[0] * 100)), CAPTURE, max_wait_seconds=0.4)
@@ -893,120 +1209,19 @@ class CommandRecordingTests(unittest.TestCase):
         self.assertEqual(record_command(iter(frames(1000, 1000)), CAPTURE, max_wait_seconds=6).size, 0)
 
 
-class WakePhraseTests(unittest.TestCase):
-    def setUp(self):
-        self.wake = WakePhrase("hey sam")
-
-    def test_request_after_wake_phrase(self):
-        self.assertEqual(self.wake.strip("Hey Sam, what's the weather today?"), "What's the weather today?")
-        self.assertEqual(self.wake.strip("hi sam what is my EMI"), "What is my EMI")  # no pause, request word
-        self.assertEqual(self.wake.strip("OK Sam."), "")
-
-    def test_other_speech_is_not_a_request(self):
-        for text in (
-            "Sam is coming for dinner tonight.",  # greeting required for "hey sam"
-            "Sam, where did I park?",
-            "Hey, Sam called about the meeting.",  # name not addressed
-            "I saw Sam at the gym yesterday.",
-            "Hey Samantha, hi",
-            "Hey, are you coming to dinner?",
-            "",
-        ):
-            self.assertIsNone(self.wake.strip(text), text)
-
-    def test_phrase_without_greeting_needs_none(self):
-        self.assertEqual(WakePhrase("jarvis").strip("Jarvis, what is my EMI?"), "What is my EMI?")
-
-    def test_custom_phrase(self):
-        wake = WakePhrase("hey computer")
-        self.assertEqual(wake.name, "computer")
-        self.assertEqual(wake.strip("Hey computer, lights on"), "Lights on")
-        self.assertIsNone(wake.strip("Computer, lights on"))  # the phrase has a greeting, so one is required
-
-    def test_sleep_commands(self):
-        self.assertTrue(is_sleep_command("That's all."))
-        self.assertTrue(is_sleep_command("Stop listening!"))
-        self.assertTrue(is_sleep_command("That's all, thanks."))
-        self.assertTrue(is_sleep_command("OK, thank you."))
-        self.assertTrue(is_sleep_command("No thanks"))
-        self.assertFalse(is_sleep_command("stop the timer"))
-        self.assertFalse(is_sleep_command("thanks, what is my EMI"))
-        self.assertFalse(is_sleep_command(""))
-
-
-class ConversationTests(unittest.TestCase):
-    def test_speech_without_wake_phrase_is_ignored_and_not_printed(self):
-        source, _, _, indicator = conversation(["Are you coming to dinner?"])
-        result, out = quietly(source.next_utterance)
-        self.assertEqual(result, "")
-        self.assertFalse(source.awake)
-        self.assertNotIn("dinner", out)
-        self.assertEqual(indicator.states, [IndicatorState.IDLE, IndicatorState.THINKING])
-
-    def test_wake_phrase_then_follow_ups_without_it(self):
-        source, capture, _, indicator = conversation(
-            ["Hey Sam, what is my EMI?", "And my monthly income?"]
-        )
-        self.assertEqual(quietly(source.next_utterance)[0], "What is my EMI?")
-        self.assertTrue(source.awake)
-        self.assertEqual(quietly(source.next_utterance)[0], "And my monthly income?")
-        self.assertEqual(capture.waits, [None, 30])  # asleep: wait forever; awake: conversation timeout
-        self.assertEqual(indicator.states[-2:], [IndicatorState.LISTENING, IndicatorState.THINKING])
-
-    def test_bare_wake_phrase_starts_listening(self):
-        source, _, _, _ = conversation(["Hey Sam!", "What is my EMI?"])
+class MuteAndIndicatorTests(unittest.TestCase):
+    def test_one_word_noise_transcripts_are_ignored(self):
+        indicator = RecordingIndicator()
+        source = MicInput(FakeCapture(), FakeTranscriber("A"), SoftwareMuteSwitch(), indicator)
         self.assertEqual(quietly(source.next_utterance)[0], "")
-        self.assertTrue(source.awake)
-        self.assertEqual(quietly(source.next_utterance)[0], "What is my EMI?")
 
-    def test_silence_ends_the_conversation(self):
-        source, _, _, _ = conversation(["Hey Sam, what is my EMI?"], seconds=(1, 0))
-        quietly(source.next_utterance)
-        result, out = quietly(source.next_utterance)
-        self.assertEqual(result, "")
-        self.assertFalse(source.awake)
-        self.assertIn("[SLEEP] no follow-up for 30 s", out)
-
-    def test_sleep_command_ends_the_conversation(self):
-        source, _, _, _ = conversation(["Hey Sam, what is my EMI?", "That's all, thanks."])
-        quietly(source.next_utterance)
-        source.transcriber.texts = ["That's all, thanks."]
-        self.assertEqual(quietly(source.next_utterance)[0], "")
-        self.assertFalse(source.awake)
-
-    def test_wake_phrase_with_stop_never_exits_the_app(self):
-        source, _, _, _ = conversation(["Hey Sam, stop."])
-        self.assertEqual(quietly(source.next_utterance)[0], "")
-        self.assertFalse(source.awake)
-
-    def test_muting_ends_the_conversation(self):
-        source, _, _, indicator = conversation(["Hey Sam, what is my EMI?"])
-        quietly(source.next_utterance)
-        source.mute.set_muted(True)
-        quietly(source.next_utterance)
-        self.assertFalse(source.awake)
-        self.assertIs(indicator.states[-1], IndicatorState.MUTED)
-
-    def test_only_the_start_of_long_speech_is_checked_while_asleep(self):
-        source, _, transcriber, _ = conversation(["We should book the tickets soon"], seconds=(10,))
-        quietly(source.next_utterance)
-        self.assertEqual(transcriber.lengths, [3.0])  # 3 s checked, the rest never transcribed
-
-    def test_long_request_is_transcribed_in_full_after_waking(self):
-        source, _, transcriber, _ = conversation(
-            ["Hey Sam, when does", "Hey Sam, when does my car insurance expire?"], seconds=(6,)
-        )
-        self.assertEqual(quietly(source.next_utterance)[0], "When does my car insurance expire?")
-        self.assertEqual(transcriber.lengths, [3.0, 6.0])
-
-    def test_without_wake_phrase_every_utterance_is_a_request(self):
+    def test_every_utterance_is_a_request(self):
         indicator = RecordingIndicator()
         source = MicInput(FakeCapture(), FakeTranscriber(), SoftwareMuteSwitch(), indicator)
         self.assertEqual(quietly(source.next_utterance)[0], "what is my income")
         self.assertEqual(indicator.states, [IndicatorState.LISTENING, IndicatorState.THINKING])
 
 
-class MuteAndIndicatorTests(unittest.TestCase):
     def test_muted_mic_never_records(self):
         capture = FakeCapture()
         indicator = RecordingIndicator()
@@ -1043,19 +1258,46 @@ class SpeechOutputTests(unittest.TestCase):
             speaker.say("-v is not an option here")
         (synth, synth_input), (play, play_input) = calls
         self.assertEqual(synth[:3], ["espeak-ng", "--stdin", "--stdout"])
+        self.assertEqual(synth[synth.index("-s") + 1], str(TTS_RATE))
         self.assertEqual(synth_input, b"-v is not an option here")
         self.assertEqual(play, ["aplay", "-q", "-D", "plughw:CARD=Headphones"])
         self.assertEqual(play_input, b"RIFF-wav")
 
     def test_playback_failure_is_reported_not_raised(self):
-        def failing_run(command, **kwargs):
-            raise subprocess.CalledProcessError(1, command, stderr=b"audio open error: Unknown error 524")
+        def run(command, **kwargs):
+            if command[0] == "aplay":
+                raise subprocess.CalledProcessError(1, command, stderr=b"audio open error: Unknown error 524")
+            return subprocess.CompletedProcess(command, 0, stdout=b"RIFF-wav", stderr=b"")
 
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            EspeakSpeaker(run=failing_run).say("hello")
+            EspeakSpeaker(["default"], run=run).say("hello")
         self.assertIn("Unknown error 524", out.getvalue())
         self.assertIn("AUDIO_OUTPUT_DEVICE", out.getvalue())
+
+    def test_falls_back_to_a_working_device_and_keeps_it(self):
+        played = []
+
+        def run(command, **kwargs):
+            if command[0] == "aplay":
+                played.append(command[-1])
+                if command[-1] == "default":
+                    raise subprocess.CalledProcessError(1, command, stderr=b"Unknown error 524")
+            return subprocess.CompletedProcess(command, 0, stdout=b"RIFF-wav", stderr=b"")
+
+        speaker = EspeakSpeaker(["default", "plughw:3,0"], run=run)
+        with contextlib.redirect_stdout(io.StringIO()):
+            speaker.say("one")
+            speaker.say("two")
+        self.assertEqual(played, ["default", "plughw:3,0", "plughw:3,0"])  # second reply goes straight there
+        self.assertEqual(speaker.device, "plughw:3,0")
+
+    def test_output_prefers_the_microphones_own_device(self):
+        from companion.device.tts import output_candidates
+        self.assertEqual(
+            output_candidates("Plantronics Blackwire 3220 Seri: USB Audio (hw:3,0)"),
+            ["plughw:3,0", "plughw:CARD=Headphones,DEV=0", "default"],
+        )
 
 
 if __name__ == "__main__":

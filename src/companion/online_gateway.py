@@ -115,6 +115,14 @@ class LookupResult:
     stale_since: str = ""  # set when a refresh failed and cached data was reused
 
 
+def best_place(results: list[dict], home_country: str) -> dict:
+    """Prefer the home country, then the most populous place, so "Mysuru" is the
+    city rather than a toll gate of the same name. The choice is made locally:
+    the home country is never sent."""
+    home = [r for r in results if r.get("country_code") == home_country] or results
+    return max(home, key=lambda r: r.get("population") or 0)
+
+
 def check_host_allowed(url: str) -> None:
     host = urllib.parse.urlparse(url).hostname or ""
     if host not in ALLOWED_HOSTS:
@@ -149,8 +157,10 @@ class OnlineGateway:
         fetch: Callable[..., Any] = fetch,
         kinds: tuple[str, ...] = KINDS,
         clock: Callable[[], float] = time.time,
+        home_country: str = "IN",
     ):
         self.enabled = enabled
+        self.home_country = home_country.upper()
         self.kinds = frozenset(kinds) if enabled else frozenset()
         self._fetch = fetch
         self._clock = clock
@@ -202,11 +212,11 @@ class OnlineGateway:
 
     def _weather(self, request: LookupRequest) -> LookupResult:
         places, _ = self._get(
-            "weather", GEOCODING_URL, {"name": request.place, "count": 1, "language": "en", "format": "json"}
+            "weather", GEOCODING_URL, {"name": request.place, "count": 10, "language": "en", "format": "json"}
         )
         if not places.get("results"):
             raise LookupUnavailable(f"I couldn't find a place called {request.place}.")
-        place = places["results"][0]
+        place = best_place(places["results"], self.home_country)
         name = ", ".join(part for part in (place.get("name"), place.get("country")) if part)
 
         forecast, _ = self._get(

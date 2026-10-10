@@ -54,6 +54,42 @@ def require_local_answer(response: str) -> str:
     return response if response.strip() else LOCAL_FALLBACK_ANSWER
 
 
+# The small model sometimes answers as the user ("I am 175 cm tall", "I am taking ...").
+# Telling it not to in the prompt made its other answers worse, so the opening is fixed
+# here, except where the assistant speaks of itself ("I am not sure", "I am sorry").
+SPOKEN_AS_USER = re.compile(
+    r"^I(?: am|'m)\b(?!\s+(?:not|unable|sorry|afraid|an?|your|here|happy|glad|just|only|the)\b)|^I take\b"
+)
+
+
+def as_second_person(answer: str) -> str:
+    """ "I am 175 cm tall" -> "You are 175 cm tall", "I take X" -> "You take X"."""
+    return SPOKEN_AS_USER.sub(lambda m: "You take" if m.group().endswith("take") else "You are", answer)
+
+
+# A sentence end is punctuation, maybe closing quotes or brackets, then a space or the
+# end, so the "." in "25.5" is not one.
+SENTENCE_END = re.compile(r"[.!?][\"')\]]*(?=\s|$)")
+
+
+def full_sentences(text: str) -> str:
+    """Drop an unfinished last sentence (a model reply cut off by its token limit); a
+    reply with no full sentence is ended with "." instead."""
+    text = text.strip()
+    ends = [match.end() for match in SENTENCE_END.finditer(text)]
+    if ends and ends[-1] == len(text) or not text:
+        return text
+    return text[: ends[-1]] if ends else text.rstrip(",;:- ") + "."
+
+
+def limit_words(text: str, max_words: int) -> str:
+    """At most `max_words` words, ending at the last full sentence that fits."""
+    words = text.split()
+    if len(words) <= max_words:
+        return text
+    return full_sentences(" ".join(words[:max_words]))
+
+
 def redact_for_log(text: str) -> str:
     """Remove credentials from diagnostic logs."""
     text = re.sub(r"\b(?:password|token|secret)\b", "[REDACTED]", text, flags=re.I)
