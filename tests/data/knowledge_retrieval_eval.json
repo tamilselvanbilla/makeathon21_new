@@ -81,6 +81,12 @@
     {"q": "What is the principal on my home loan?", "expect": ["bank loan"]},
     {"q": "What is my voter ID number?", "expect": ["voter id"]},
     {"q": "What is my eye prescription?", "expect": null},
-    {"q": "How much is my gym membership?", "expect": null}
+    {"q": "How much is my gym membership?", "expect": null},
+    {"q": "Tell me about my career.", "expect": ["current organization"]},
+    {"q": "Can you answer my career related questions?", "expect": ["current organization"]},
+    {"q": "What is my work experience?", "expect": ["current organization"]},
+    {"q": "How many years of experience do I have?", "expect": ["current organization"]},
+    {"q": "What is my employment history?", "expect": ["current organization"]},
+    {"q": "What is my professional background?", "expect": ["current organization"]}
   ]
 }

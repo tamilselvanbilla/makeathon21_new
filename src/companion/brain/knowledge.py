@@ -47,6 +47,7 @@ STOPWORDS = frozenset(
     say said says written put hold holding own owned owns go goes went make made
     keep kept use used using long normal level like right still just also ever
     into under over onto per than then her his him she he they them pay
+    related regarding question questions answer summarize summarise summary overview
     """.split()
 )
 # Everyday words mapped to the vocabulary used in the records, so "earn"
@@ -92,6 +93,15 @@ SYNONYMS = {
     "drive": "vehicle", "driving": "vehicle license", "insurer": "insurance provider",
     "company": "organization employer provider", "complete": "years period", "completed": "years period",
     "rate": "rate minute percent",
+    # Career questions: the records hold organizations, roles and periods.
+    "career": "organization role", "experience": "organization role period",
+    "experienced": "organization role period", "employment": "organization role employer",
+    "employed": "organization role employer", "profession": "role organization",
+    "professional": "role organization", "occupation": "role organization",
+    "worked": "organization role", "working": "organization role",
+    "resume": "organization role school college qualification", "cv": "organization role school college qualification",
+    "background": "organization role school college qualification",
+    "year": "years period",
 }
 
 Records = dict[str, list[dict[str, Any]]]
