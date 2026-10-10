@@ -1,0 +1,78 @@
+{
+  "description": "End-to-end conversations through the real assistant (local model, personal records, memory with embeddings). The clock starts on Friday 9 October 2026, 10:00. Each step is one of: 'say' (a request; its reply must match every 'all' and at least one 'any' pattern, and no 'forbid' pattern; case-insensitive regex), 'advance' (minutes), 'restart' (new memory and assistant on the same files, as after a reboot), 'announce' (reminders due now; 'expect' pattern, or null for none), 'briefing' (the startup briefing). Steps with 'known_miss' document a limitation and are reported separately. Every scenario starts with empty memory.",
+  "scenarios": [
+    {"id": "note_recall", "category": "notes", "steps": [
+      {"say": "Remember that I parked my car on level B2 near pillar 14", "any": ["remember"]},
+      {"say": "Where did I park my car?", "all": ["B2"]},
+      {"restart": true},
+      {"say": "Which level is my car on?", "all": ["B2"]},
+      {"say": "Where is my car parked?", "all": ["B2"]}
+    ]},
+    {"id": "pause_split", "category": "notes", "steps": [
+      {"say": "Please remember that.", "any": ["what should i remember"]},
+      {"say": "I lent my drill to Ravi.", "any": ["remember"]},
+      {"say": "Who has my drill?", "all": ["Ravi"]},
+      {"say": "Who did I give my power tool to?", "all": ["Ravi"], "known_miss": "Paraphrase too far for MiniLM (similarity below 0.35); also a miss in the memory retrieval benchmark. The reply is an honest 'couldn't find'."}
+    ]},
+    {"id": "statement_offer", "category": "schedule", "steps": [
+      {"say": "I have a meeting with Jay tomorrow at 7am.", "any": ["do you want me to remember"]},
+      {"say": "Yes please", "all": ["Saturday 10 October at 7:00 AM"]},
+      {"say": "What is my schedule tomorrow?", "all": ["Jay", "7:00 AM"]},
+      {"say": "What time is my meeting with Jay?", "all": ["7:00 AM"]},
+      {"say": "Do I have anything on Sunday?", "any": ["nothing noted"]}
+    ]},
+    {"id": "reminder_due", "category": "reminders", "steps": [
+      {"say": "Remind me to take my blood pressure tablet in 10 minutes", "all": ["remind you then"]},
+      {"announce": true, "expect": null},
+      {"advance": 10},
+      {"announce": true, "expect": "take your blood pressure tablet"},
+      {"announce": true, "expect": null}
+    ]},
+    {"id": "reminder_after_restart", "category": "reminders", "steps": [
+      {"say": "Remind me to call the bank tomorrow at 11 am", "all": ["11:00 AM"]},
+      {"say": "Don't forget that the plumber is coming on Monday", "any": ["remember"]},
+      {"restart": true},
+      {"advance": 1380},
+      {"briefing": true, "expect": "call the bank at 11:00 AM"},
+      {"say": "What are my reminders?", "all": ["bank", "plumber"]},
+      {"announce": true, "expect": null},
+      {"advance": 120},
+      {"announce": true, "expect": "call the bank"}
+    ]},
+    {"id": "decline_and_forget", "category": "notes", "steps": [
+      {"say": "I left my umbrella in the office", "any": ["do you want me to remember"]},
+      {"say": "No", "any": ["won't remember"]},
+      {"say": "Remember that my gym locker code is 4512", "any": ["remember"]},
+      {"say": "What is my gym locker code?", "all": ["4512"]},
+      {"say": "Forget that", "any": ["forgotten"]},
+      {"say": "What is my gym locker code?", "forbid": ["4512"]}
+    ]},
+    {"id": "records_reasoning", "category": "records", "steps": [
+      {"say": "What is my monthly income?", "any": ["85,?000"]},
+      {"say": "And my wife's?", "any": ["62,?000"], "forbid": ["85,?000"]},
+      {"say": "What is my EMI?", "any": ["9,?200"]},
+      {"say": "When does my car insurance expire?", "any": ["2027-06-15", "15(th)? june,? 2027", "june 15(th)?,? 2027"]},
+      {"say": "What did you tell me about my monthly income?", "any": ["85,?000"]}
+    ]},
+    {"id": "honesty", "category": "records", "steps": [
+      {"say": "What is my blood group?", "any": ["couldn't find", "not (in|recorded|available|mentioned)", "don'?t have"], "forbid": ["\\b(a|b|ab|o)\\s?[+-]", "positive", "negative"]},
+      {"say": "When does my passport expire?", "any": ["couldn't find", "not (in|recorded|available|mentioned|specified)", "don'?t have"], "forbid": ["\\b20[2-4]\\d\\b"]},
+      {"say": "Where did I keep my glasses?", "any": ["don't have a note", "couldn't find", "not (in|recorded|available|mentioned)", "don'?t have", "not certain"], "forbid": ["you (kept|put|left) (them|your glasses)"]}
+    ]},
+    {"id": "notes_vs_records", "category": "notes", "steps": [
+      {"say": "Keep in mind that I prefer green tea over coffee", "any": ["remember"]},
+      {"say": "Remember that mom's birthday is on 12 March", "any": ["remember"]},
+      {"say": "When is my mother's birthday?", "all": ["12 March"]},
+      {"say": "What do I like to drink?", "any": ["green tea"]},
+      {"say": "What is my monthly income?", "any": ["85,?000"]}
+    ]},
+    {"id": "forget_everything", "category": "notes", "steps": [
+      {"say": "Remember that the spare key is under the flower pot", "any": ["remember"]},
+      {"say": "Where is the spare key?", "all": ["flower pot"]},
+      {"say": "Forget everything", "any": ["erased"]},
+      {"say": "Where is the spare key?", "forbid": ["flower pot"]},
+      {"restart": true},
+      {"say": "Where is the spare key?", "forbid": ["flower pot"]}
+    ]}
+  ]
+}

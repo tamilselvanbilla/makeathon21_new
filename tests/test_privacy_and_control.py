@@ -24,7 +24,7 @@ from companion.brain.memory import (  # noqa: E402
     note_answer,
     parse_memory_command,
 )
-from companion.brain.prompts import NO_RECORDS, NOT_IN_RECORDS_ANSWER, build_system_prompt, build_welcome  # noqa: E402
+from companion.brain.prompts import NO_NOTE_ANSWER, NO_RECORDS, NOT_IN_RECORDS_ANSWER, build_system_prompt, build_welcome  # noqa: E402
 from companion.brain.llm import clean_model_response  # noqa: E402
 from companion.audio.capture import pick_microphone, record_command  # noqa: E402
 from companion.audio.stt import echoes_prompt, looks_like_noise, reliable  # noqa: E402
@@ -495,13 +495,15 @@ class SpeechFilterTests(unittest.TestCase):
 
 
 class PromptTests(unittest.TestCase):
-    def test_system_prompt_describes_role_records_and_family(self):
+    def test_system_prompt_describes_role_and_records(self):
         kb = KnowledgeBase(load_knowledge())
         prompt = build_system_prompt(kb.primary_user, kb.currency, "Sam", kb.family)
         for part in ("personal assistant for John", "insurance policies", "medical and health records",
-                     "identity documents", "(wife Jane, son Robert)", "use only Knowledge and Memory",
+                     "identity documents", "use only Knowledge and Memory",
                      "general questions", "identity numbers only when asked"):
             self.assertIn(part, prompt)
+        self.assertNotIn("wife Jane", prompt)
+        self.assertNotIn("son Robert", prompt)
 
     def test_welcome_names_the_assistant(self):
         self.assertEqual(build_welcome("Sam", "John"), "Hello John, I'm Sam, your private assistant. Ask me anything.")
@@ -550,8 +552,16 @@ class PipelineTests(unittest.TestCase):
     def test_personal_question_without_records_skips_the_model(self):
         llm = FakeLLM()
         assistant, _, _ = make_assistant(llm=llm)
+        self.assertEqual(NOT_IN_RECORDS_ANSWER, "No matched data found.")
         self.assertEqual(assistant.respond("what is my blood group"), NOT_IN_RECORDS_ANSWER)
         self.assertEqual(assistant.respond("when does my passport expire"), NOT_IN_RECORDS_ANSWER)
+        self.assertEqual(llm.calls, [])
+
+    def test_removed_family_data_is_not_answered_from_the_model(self):
+        llm = FakeLLM()
+        assistant, _, _ = make_assistant(llm=llm)
+        assistant.knowledge = KnowledgeBase(load_knowledge())
+        self.assertEqual(assistant.respond("what is my wife's employer"), NOT_IN_RECORDS_ANSWER)
         self.assertEqual(llm.calls, [])
 
     def test_general_question_without_records_still_reaches_the_model(self):
@@ -792,6 +802,24 @@ class NoteAndScheduleTests(unittest.TestCase):
         self.say("Remember that I have got my car on level B2.")
         self.say("Where did I park my car?")  # stored as a turn
         self.assertEqual(self.say("Where did I park my car?"), "On 9 October you told me that you have got your car on level B2.")
+
+    def test_forget_that_removes_the_note_just_discussed_and_its_quotes(self):
+        self.say("Remember that my gym locker code is 4512")
+        self.say("What is my gym locker code?")  # answer quoting the note is stored as a turn
+        self.assertEqual(self.say("Forget that"), "Okay, I've forgotten that your gym locker code is 4512.")
+        self.assertNotIn("4512", self.say("What is my gym locker code?"))
+        self.assertNotIn("4512", self.memory.context_for("what did you tell me about my gym locker code?"))
+
+    def test_where_is_my_thing_without_a_note_is_not_guessed(self):
+        self.assertEqual(self.say("Where is the spare key?"), NO_NOTE_ANSWER)
+        self.assertEqual(self.say("Where did I keep my glasses?"), NO_NOTE_ANSWER)
+        self.assertEqual(self.llm.calls, [])
+        self.say("Where is the Eiffel Tower?")  # a name: general knowledge, the model answers
+        self.assertEqual(len(self.llm.calls), 1)
+
+    def test_family_words_match_notes(self):
+        self.say("Remember that mom's birthday is on 12 March")
+        self.assertEqual(self.say("When is my mother's birthday?"), "On 9 October you told me that mom's birthday is on 12 March.")
 
     def test_tasks_are_offered(self):
         self.assertEqual(self.say("My wife asked me to buy vegetables on the way home"),

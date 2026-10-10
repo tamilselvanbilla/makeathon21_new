@@ -86,6 +86,9 @@ MEMORY_SYNONYMS = {
     "keep": "kept put left placed", "kept": "put left placed", "put": "kept left placed",
     "lend": "lent borrowed gave", "borrow": "lent borrowed gave", "borrowed": "lent gave",
     "meeting": "call appointment", "appointment": "meeting",
+    "mother": "mom mum amma", "mom": "mother mum amma", "mum": "mother mom",
+    "father": "dad appa", "dad": "father appa",
+    "like": "prefer love favourite favorite", "prefer": "like love favourite favorite",
 }
 FORGET_ALL = re.compile(
     r"^\W*(?:please\s+)?(?:forget everything|clear (?:your|all|the) memor(?:y|ies)|"
@@ -239,6 +242,7 @@ class ConversationMemory:
         self.top_k = top_k
         self.embedder = embedder
         self.min_similarity = min_similarity
+        self.last_note_id: int | None = None  # the note saved most recently in this session
         self._clock = clock
         if path is not None:
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -301,6 +305,7 @@ class ConversationMemory:
         """Save a note; returns the text as stored (dates resolved) and its date, if any."""
         stored, when = resolve_note(text, self._clock())
         rowid = self._add("note", stored)
+        self.last_note_id = rowid
         if when is not None:
             self._db.execute(
                 "INSERT INTO schedule (id, due, has_time, what) VALUES (?, ?, ?, ?)",
@@ -352,14 +357,27 @@ class ConversationMemory:
     def add_turn(self, question: str, answer: str) -> None:
         self._add("turn", question, answer)
 
-    def forget_last(self) -> MemoryItem | None:
-        items = self._select("ORDER BY rowid DESC LIMIT 1")
-        if items:
-            self._db.execute("DELETE FROM memory WHERE rowid = ?", (items[0].id,))
-            self._db.execute("DELETE FROM vectors WHERE id = ?", (items[0].id,))
-            self._db.execute("DELETE FROM schedule WHERE id = ?", (items[0].id,))
-            self._db.commit()
-        return items[0] if items else None
+    def forget_last(self, note_id: int | None = None) -> MemoryItem | None:
+        """Delete `note_id` (the note just discussed) if given and still stored, else the
+        newest item. Deleting a note also deletes past answers that quoted it, so its
+        content can't come back through a recall question."""
+        items = self._select("WHERE rowid = ?", (note_id,)) if note_id is not None else []
+        items = items or self._select("ORDER BY rowid DESC LIMIT 1")
+        if not items:
+            return None
+        item = items[0]
+        doomed = [item.id]
+        if item.kind == "note":
+            quoted = second_person(item.question)
+            doomed += [
+                rowid for (rowid,) in self._db.execute(
+                    "SELECT rowid FROM memory WHERE kind = 'turn' AND instr(answer, ?) > 0", (quoted,)
+                )
+            ]
+        for table, column in (("memory", "rowid"), ("vectors", "id"), ("schedule", "id")):
+            self._db.executemany(f"DELETE FROM {table} WHERE {column} = ?", [(rowid,) for rowid in doomed])
+        self._db.commit()
+        return item
 
     def forget_all(self) -> int:
         count = self._db.execute("SELECT count(*) FROM memory").fetchone()[0]

@@ -5,7 +5,8 @@
 # transcript "A": "Your monthly salary is INR 50,000").
 EXAMPLE_FIGURE = "50,000"
 DIDNT_CATCH_ANSWER = "Sorry, I didn't catch that. Could you say it again?"
-NOT_IN_RECORDS_ANSWER = "I couldn't find that in your personal records, so I won't guess."
+NOT_IN_RECORDS_ANSWER = "No matched data found."
+NO_NOTE_ANSWER = "I don't have a note about that, so I won't guess. Tell me \"remember that …\" and I'll keep it."
 NO_RECORDS = "None needed or none found."
 
 

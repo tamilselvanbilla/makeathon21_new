@@ -28,6 +28,7 @@ from .brain.prompts import (
     DIDNT_CATCH_ANSWER,
     EXAMPLE_FIGURE,
     NOT_IN_RECORDS_ANSWER,
+    NO_NOTE_ANSWER,
     build_advice_prompt,
     build_system_prompt,
     build_user_prompt,
@@ -41,6 +42,12 @@ from .telemetry import log_event
 from .tracing import Tracer, annotate, set_turn, span
 
 MUTE_POLL_SECONDS = 0.1
+# "Where is the spare key?", "Where did I keep my glasses?": only a note can answer these,
+# so with none the model must not guess. "Where is the Eiffel Tower?" (a name) still goes to it.
+WHERE_IS_MINE = re.compile(
+    r"^\W*[Ww]here\s+(?:(?:is|are|was|were|'s)\s+(?:[Tt]he|[Mm]y|[Oo]ur)\s+[a-z]|"
+    r"(?:did|do|have|had)\s+(?:I|we)\b|[Ii]\s+(?:kept|put|left|parked))"
+)
 # Content after "remind me": "call mom" becomes "I need to call mom"; "I have ..." stays.
 STATEMENT_OR_TO = re.compile(r"^\W*(?:i|i'm|i've|we|my|our|to)\b", re.I)
 # Reminders missed by more than this (device off) are not read out late.
@@ -156,10 +163,12 @@ class Assistant:
         # What the next utterance completes: ("content", prefix) after a bare "remember
         # that", or ("confirm", statement) after "do you want me to remember that ...?".
         self._pending: tuple[str, str] | None = None
+        self._focus_note: int | None = None  # the note the last reply was about, for "forget that"
 
     def respond(self, text: str) -> str:
         """Answer one request. Reasoning always runs on the local model."""
         set_turn(input=text)
+        focus, self._focus_note = self._focus_note, None
         pending, self._pending = self._pending, None
         if pending:
             reply = self._complete_pending(pending, text)
@@ -169,7 +178,7 @@ class Assistant:
         command = parse_memory_command(text)
         if command:
             set_turn(route=f"memory_{command.action}")
-            return self._memory_command(command)
+            return self._memory_command(command, focus)
         is_schedule, day = self.memory.schedule_question(text)
         if is_schedule:
             with span("schedule", day=str(day or "week")):
@@ -219,8 +228,14 @@ class Assistant:
         if items and items[0].kind == "note" and (not knowledge or items[0].exact):
             # Answer from the user's own note directly; a small model may misquote it.
             set_turn(route="note" if items[0].exact else "note_hedged")
-            return note_answer(items[0]), True
+            self._focus_note = items[0].id
+            # Not saved as a past exchange: it would only duplicate the note and could
+            # outrank it later, or keep its content after the note is forgotten.
+            return note_answer(items[0]), False
         remembered = describe(items)
+        if not knowledge and not remembered and WHERE_IS_MINE.match(text):
+            set_turn(route="no_note")
+            return NO_NOTE_ANSWER, False
         if not knowledge and not remembered and self.knowledge.is_personal(effective):
             # Nothing on record or in memory: answer honestly instead of guessing.
             set_turn(route="not_in_records")
@@ -300,20 +315,21 @@ class Assistant:
 
     def _save_note(self, text: str) -> str:
         stored, when = self.memory.add_note(text)
+        self._focus_note = self.memory.last_note_id
         print(f"[MEMORY] note saved on this device: {stored!r}" + (f", reminder at {when.due}" if when and when.has_time else ""))
         reply = f"Okay, I'll remember{that_clause(stored)}."
         if when and when.has_time and when.due > self.memory.now():
             reply = reply[:-1] + ", and remind you then."
         return reply
 
-    def _memory_command(self, command: MemoryCommand) -> str:
+    def _memory_command(self, command: MemoryCommand, focus: int | None = None) -> str:
         if command.action == "remember":
             return self._save_note(command.text)
         if command.action == "remember_pending":
             self._pending = ("content", command.text)
             return "Sure. What should I remind you to do?" if command.text == "to" else "Sure. What should I remember?"
         if command.action == "forget_last":
-            item = self.memory.forget_last()
+            item = self.memory.forget_last(focus)
             print("[MEMORY] last item deleted" if item else "[MEMORY] nothing to delete")
             if item is None:
                 return "There's nothing to forget."
