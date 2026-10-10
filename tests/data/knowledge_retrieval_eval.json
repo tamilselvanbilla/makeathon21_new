@@ -42,7 +42,8 @@
     {"q": "When did my wife have her health checkup?", "expect": null},
     {"q": "What is my son's name?", "expect": null},
     {"q": "What is my blood group?", "expect": null},
-    {"q": "When does my passport expire?", "expect": null},
+    {"q": "When does my passport expire?", "expect": ["passport"]},
+    {"q": "When does my voter ID expire?", "expect": null},
     {"q": "Where is my car key?", "expect": null},
     {"q": "What is my credit card limit?", "expect": null},
     {"q": "What is my wife's blood pressure?", "expect": null},
@@ -93,6 +94,16 @@
     {"q": "Should I lose weight?", "expect": ["vitals", "bmi"]},
     {"q": "Tell me about my health.", "expect": ["vitals", "bmi", "medical report", "prescription"]},
     {"q": "What is my blood group?", "expect": null},
-    {"q": "Do I have diabetes?", "expect": null}
+    {"q": "Do I have diabetes?", "expect": null},
+    {"q": "How long is my passport valid?", "expect": ["passport"]},
+    {"q": "When was my passport issued?", "expect": ["passport"]},
+    {"q": "When did I invest in my mutual fund?", "expect": ["mutual fund"]},
+    {"q": "When will I redeem my mutual fund?", "expect": ["mutual fund"]},
+    {"q": "How long should I take my medicine?", "expect": ["prescription"]},
+    {"q": "How often do I take my medication?", "expect": ["prescription"]},
+    {"q": "When does my prescription end?", "expect": ["prescription"]},
+    {"q": "When did I buy my Infosys shares?", "expect": ["stock"]},
+    {"q": "When does my home loan end?", "expect": ["bank loan"]},
+    {"q": "When does my driving license expire?", "expect": ["driving license"]}
   ]
 }

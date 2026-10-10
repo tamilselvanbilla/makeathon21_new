@@ -30,7 +30,12 @@
       "units": 323.5,
       "investment_amount": 25000,
       "current_value": 27300,
-      "asset_type": "Mutual Fund"
+      "asset_type": "Mutual Fund",
+      "investment_mode": "Lump sum",
+      "investment_date": "2023-06-15",
+      "planned_holding_period_years": 5,
+      "planned_redemption_date": "2028-06-15",
+      "details": "Invested INR 25,000 as a lump sum on 2023-06-15 with a planned holding period of 5 years, until 2028-06-15."
     },
     {
       "owner": "John",
@@ -40,7 +45,8 @@
       "quantity": 10,
       "purchase_price": 1750,
       "current_price": 1880,
-      "current_value": 18800
+      "current_value": 18800,
+      "purchase_date": "2024-01-10"
     },
     {
       "owner": "John",
@@ -48,7 +54,10 @@
       "issuer": "State Bank of India",
       "face_value": 50000,
       "coupon_rate": 6.5,
-      "maturity_date": "2028-12-31"
+      "maturity_date": "2028-12-31",
+      "purchase_date": "2023-12-31",
+      "tenure_years": 5,
+      "interest_payout": "Annual"
     },
     {
       "owner": "John",
@@ -58,7 +67,10 @@
       "principal": 1200000,
       "annual_interest_rate": 7.5,
       "monthly_installment": 9200,
-      "remaining_tenure_months": 84
+      "remaining_tenure_months": 84,
+      "loan_start_date": "2019-10-05",
+      "loan_end_date": "2033-10-05",
+      "total_tenure_months": 168
     }
   ],
   "medical": [
@@ -75,7 +87,12 @@
       "prescription_date": "2026-04-02",
       "prescription_number": "TEST-PRESCRIPTION-001",
       "medication": "Sample medication for monitoring",
-      "dosage": "As advised by a clinician"
+      "dosage": "As advised by a clinician",
+      "frequency": "Once daily after breakfast",
+      "start_date": "2026-04-02",
+      "duration_months": 12,
+      "end_date": "2027-04-01",
+      "details": "Take once daily after breakfast for 12 months, from 2026-04-02 to 2027-04-01, then review with the clinician."
     },
     {
       "owner": "John",
@@ -101,28 +118,38 @@
       "record_type": "aadhar_card",
       "document_number": "TEST-AADHAR-000000000000",
       "document_type": "Aadhaar",
-      "status": "Synthetic placeholder"
+      "status": "Synthetic placeholder",
+      "validity": "No expiry"
     },
     {
       "owner": "John",
       "record_type": "pan_card",
       "document_number": "TESTPAN0001M",
       "document_type": "PAN",
-      "status": "Synthetic placeholder"
+      "status": "Synthetic placeholder",
+      "validity": "No expiry"
     },
     {
       "owner": "John",
       "record_type": "passport",
       "document_number": "TEST-PASSPORT-00001",
       "document_type": "Passport",
-      "status": "Synthetic placeholder"
+      "status": "Synthetic placeholder",
+      "issue_date": "2019-08-20",
+      "expiry_date": "2029-08-19",
+      "validity_years": 10,
+      "place_of_issue": "Bengaluru",
+      "details": "Passport issued on 2019-08-20 in Bengaluru, valid for 10 years until 2029-08-19."
     },
     {
       "owner": "John",
       "record_type": "driving_license",
       "document_number": "TEST-DL-00001",
       "document_type": "Driving License",
-      "status": "Synthetic placeholder"
+      "status": "Synthetic placeholder",
+      "issue_date": "2015-03-12",
+      "expiry_date": "2035-03-11",
+      "validity_years": 20
     },
     {
       "owner": "John",

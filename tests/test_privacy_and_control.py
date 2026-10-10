@@ -553,6 +553,7 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(policy.as_second_person("I am taking Sample medication."), "You are taking Sample medication.")
         self.assertEqual(policy.as_second_person("I take it daily."), "You take it daily.")
         self.assertEqual(policy.as_second_person("I am 175 cm tall."), "You are 175 cm tall.")
+        self.assertEqual(policy.as_second_person("I invested in your mutual fund on 2023-06-15."), "You invested in your mutual fund on 2023-06-15.")
         self.assertEqual(policy.as_second_person("I cannot find that."), "I cannot find that.")
         self.assertEqual(policy.as_second_person("I am not sure."), "I am not sure.")
         self.assertEqual(policy.as_second_person("I'm sorry, that isn't recorded."), "I'm sorry, that isn't recorded.")

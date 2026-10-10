@@ -104,6 +104,8 @@ SYNONYMS = {
     "background": "organization role school college qualification",
     "year": "years period",
     "lose": "weight bmi", "fat": "weight bmi", "obese": "bmi overweight",
+    "redeem": "redemption", "withdraw": "redemption", "often": "frequency", "frequently": "frequency",
+    "buy": "purchase", "bought": "purchase", "purchased": "purchase", "issued": "issue",
 }
 
 Records = dict[str, list[dict[str, Any]]]

@@ -58,13 +58,14 @@ def require_local_answer(response: str) -> str:
 # Telling it not to in the prompt made its other answers worse, so the opening is fixed
 # here, except where the assistant speaks of itself ("I am not sure", "I am sorry").
 SPOKEN_AS_USER = re.compile(
-    r"^I(?: am|'m)\b(?!\s+(?:not|unable|sorry|afraid|an?|your|here|happy|glad|just|only|the)\b)|^I take\b"
+    r"^I(?: am|'m)\b(?!\s+(?:not|unable|sorry|afraid|an?|your|here|happy|glad|just|only|the)\b)|"
+    r"^I (?=(?:take|invested|bought|purchased|joined|worked|studied|took|started)\b)"
 )
 
 
 def as_second_person(answer: str) -> str:
-    """ "I am 175 cm tall" -> "You are 175 cm tall", "I take X" -> "You take X"."""
-    return SPOKEN_AS_USER.sub(lambda m: "You take" if m.group().endswith("take") else "You are", answer)
+    """ "I am 175 cm tall" -> "You are 175 cm tall", "I invested ..." -> "You invested ..."."""
+    return SPOKEN_AS_USER.sub(lambda m: "You " if m.group() == "I " else "You are", answer)
 
 
 # A sentence end is punctuation, maybe closing quotes or brackets, then a space or the

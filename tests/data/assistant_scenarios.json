@@ -56,7 +56,8 @@
     ]},
     {"id": "honesty", "category": "records", "steps": [
       {"say": "What is my blood group?", "any": ["couldn't find", "not (in|recorded|available|mentioned)", "don'?t have"], "forbid": ["\\b(a|b|ab|o)\\s?[+-]", "positive", "negative"]},
-      {"say": "When does my passport expire?", "any": ["couldn't find", "not (in|recorded|available|mentioned|specified)", "don'?t have"], "forbid": ["\\b20[2-4]\\d\\b"]},
+      {"say": "When does my voter ID expire?", "any": ["no matched data", "couldn't find", "not (in|recorded|available|mentioned|specified)", "don'?t have"], "forbid": ["\\b20[2-4]\\d\\b"]},
+      {"say": "When does my passport expire?", "any": ["2029"]},
       {"say": "Where did I keep my glasses?", "any": ["don't have a note", "couldn't find", "not (in|recorded|available|mentioned)", "don'?t have", "not certain"], "forbid": ["you (kept|put|left) (them|your glasses)"]}
     ]},
     {"id": "notes_vs_records", "category": "notes", "steps": [
