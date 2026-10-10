@@ -66,7 +66,7 @@ class LLMConfig:
             threads=_env_int("LLM_THREADS", CPU_COUNT),
             batch=_env_int("LLM_BATCH", 256),
             # ~8-10 tokens/s on a Pi 4, so 128 tokens caps replies at ~15 s.
-            max_tokens=_env_int("LLM_MAX_TOKENS", 128),
+            max_tokens=_env_int("LLM_MAX_TOKENS", 80),
             # 0 = greedy: the same question always gets the same answer (at 0.2 the Pi
             # answered "monthly income" with the gross figure once and the net figure once).
             temperature=_env_float("LLM_TEMPERATURE", 0.0),

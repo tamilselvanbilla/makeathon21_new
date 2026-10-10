@@ -87,6 +87,12 @@
     {"q": "What is my work experience?", "expect": ["current organization"]},
     {"q": "How many years of experience do I have?", "expect": ["current organization"]},
     {"q": "What is my employment history?", "expect": ["current organization"]},
-    {"q": "What is my professional background?", "expect": ["current organization"]}
+    {"q": "What is my professional background?", "expect": ["current organization"]},
+    {"q": "What is my EMI amount?", "expect": ["bank loan"]},
+    {"q": "What is my E.M.I. amount?", "expect": ["bank loan"]},
+    {"q": "Should I lose weight?", "expect": ["vitals", "bmi"]},
+    {"q": "Tell me about my health.", "expect": ["vitals", "bmi", "medical report", "prescription"]},
+    {"q": "What is my blood group?", "expect": null},
+    {"q": "Do I have diabetes?", "expect": null}
   ]
 }

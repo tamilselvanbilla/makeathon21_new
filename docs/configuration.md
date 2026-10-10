@@ -22,7 +22,8 @@ Defaults marked **Pi / other** differ by platform. A Raspberry Pi is detected fr
 | `LLM_CONTEXT`     | `2048`                              | Context window in tokens. Each 1024 tokens costs about 115 MB of RAM with Qwen3-0.6B                                                                  |
 | `LLM_THREADS`     | cores                               | CPU threads for generation                                                                                                                            |
 | `LLM_BATCH`       | `256`                               | Prompt-processing batch size                                                                                                                          |
-| `LLM_MAX_TOKENS`  | `128`                               | Maximum reply length. The main lever on reply time on a Pi                                                                                            |
+| `LLM_MAX_TOKENS`  | `80`                                | Maximum reply length in tokens; 80 fits a 50-word answer. The main lever on reply time on a Pi                                                       |
+| `MAX_REPLY_WORDS` | `50`                                | Every answer is cut to this many words, at the last full sentence. Lower it for shorter replies                                                      |
 | `LLM_TEMPERATURE` | `0`                                 | 0 = greedy: the same question always gets the same answer. At 0.2 the Pi answered "monthly income" with the gross figure once and the net figure once |
 
 ## Speech recognition (faster-whisper)

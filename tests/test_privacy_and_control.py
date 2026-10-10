@@ -520,6 +520,43 @@ class PipelineTests(unittest.TestCase):
         self.assertIn(IndicatorState.THINKING, indicator.states)
         self.assertNotIn(IndicatorState.ONLINE, indicator.states)
 
+    def test_long_replies_are_cut_to_fifty_words_at_a_sentence(self):
+        long = "Your EMI is INR 9,200 a month. " + "You also hold Infosys shares and a mutual fund. " * 10
+        assistant, _, _ = make_assistant(llm=FakeLLM(long))
+        reply = assistant.respond("what is my emi amount")
+        self.assertLessEqual(len(reply.split()), 50)
+        self.assertTrue(reply.startswith("Your EMI is INR 9,200 a month.") and reply.endswith("."))
+
+    def test_word_limit_does_not_split_decimals_or_keep_unfinished_sentences(self):
+        cut = policy.limit_words("Your BMI is 25.5 and " + "very " * 60, 50)
+        self.assertEqual(len(cut.split()), 50)
+        self.assertTrue(cut.startswith("Your BMI is 25.5 and very") and cut.endswith("very."))
+        self.assertEqual(policy.limit_words("Your BMI is 25.5. " + "Walk more " * 30, 50), "Your BMI is 25.5.")
+        self.assertEqual(policy.full_sentences("Your BMI is 25.5. You should eat better and"), "Your BMI is 25.5.")
+        self.assertEqual(policy.full_sentences("Your EMI is INR 9,200"), "Your EMI is INR 9,200.")
+        self.assertEqual(policy.full_sentences('You said "hi."'), 'You said "hi."')
+
+    def test_example_figure_is_allowed_when_a_record_holds_it(self):
+        llm = FakeLLM("Your bond has a face value of INR 50,000.")
+        assistant, _, _ = make_assistant(llm=llm)
+        assistant.knowledge = KnowledgeBase({"financial": [{"owner": "John", "record_type": "bond", "face_value": 50000}]})
+        self.assertEqual(assistant.respond("what is my bond face value"), "Your bond has a face value of INR 50,000.")
+
+    def test_emi_question_sends_only_the_loan_record(self):
+        llm = FakeLLM()
+        assistant, _, _ = make_assistant(llm=llm)
+        assistant.respond("What is my E.M.I. amount?")
+        self.assertIn("9200", llm.calls[0])
+        self.assertNotIn("INFY", llm.calls[0])
+
+    def test_medicine_answer_spoken_as_the_user_is_turned_to_you(self):
+        self.assertEqual(policy.as_second_person("I am taking Sample medication."), "You are taking Sample medication.")
+        self.assertEqual(policy.as_second_person("I take it daily."), "You take it daily.")
+        self.assertEqual(policy.as_second_person("I am 175 cm tall."), "You are 175 cm tall.")
+        self.assertEqual(policy.as_second_person("I cannot find that."), "I cannot find that.")
+        self.assertEqual(policy.as_second_person("I am not sure."), "I am not sure.")
+        self.assertEqual(policy.as_second_person("I'm sorry, that isn't recorded."), "I'm sorry, that isn't recorded.")
+
     def test_unavailable_lookup_is_honest_and_skips_the_model(self):
         llm = FakeLLM()
         offline = OnlineGateway(fetch=FakeFetch(fail=True))
@@ -1073,6 +1110,25 @@ class MarketTests(unittest.TestCase):
         self.assertEqual(llm.calls, [])
         self.assertIn("[ONLINE] sent only symbols=['INFY.NS', '^NSEI', '^BSESN']", out)
         self.assertIn(IndicatorState.ONLINE, indicator.states)
+
+    def test_follow_up_on_a_new_topic_is_not_sent_down_the_market_route(self):
+        llm = FakeLLM("Your EMI is INR 9,200 a month.")
+        memory = ConversationMemory(clock=Clock())
+        assistant, _, _ = make_assistant(llm=llm, memory=memory, portfolio=self.portfolio)
+        quietly(assistant.respond, "how are my investments doing today?")
+        reply, _ = quietly(assistant.respond, "What about my EMI amount?")
+        self.assertEqual(reply, "Your EMI is INR 9,200 a month.")
+        self.assertIn("9200", llm.calls[-1])
+        self.assertNotIn("Previous question", llm.calls[-1])
+
+    def test_follow_up_naming_a_holding_stays_on_the_market_route(self):
+        llm = FakeLLM()
+        memory = ConversationMemory(clock=Clock())
+        assistant, _, _ = make_assistant(llm=llm, memory=memory, portfolio=self.portfolio)
+        quietly(assistant.respond, "how is the Nifty doing?")
+        reply, _ = quietly(assistant.respond, "and Infosys?")
+        self.assertIn("Infosys", reply)
+        self.assertEqual(llm.calls, [])
 
     def test_switched_off_market_is_answered_from_records(self):
         llm = FakeLLM("From your records, your Infosys shares were worth 18,800 rupees.")

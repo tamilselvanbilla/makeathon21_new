@@ -22,11 +22,12 @@ from .brain.memory import (
     second_person,
     that_clause,
 )
-from .brain.policy import is_uncertain, require_local_answer
+from .brain.policy import as_second_person, full_sentences, is_uncertain, limit_words, require_local_answer
 from .brain.news import headlines_reply, is_news_question, news_request
 from .brain.prompts import (
     DIDNT_CATCH_ANSWER,
     EXAMPLE_FIGURE,
+    MAX_REPLY_WORDS,
     NOT_IN_RECORDS_ANSWER,
     NO_NOTE_ANSWER,
     build_advice_prompt,
@@ -166,7 +167,14 @@ class Assistant:
         self._focus_note: int | None = None  # the note the last reply was about, for "forget that"
 
     def respond(self, text: str) -> str:
-        """Answer one request. Reasoning always runs on the local model."""
+        """Answer one request, in at most MAX_REPLY_WORDS words. Reasoning always runs on the local model."""
+        reply = self._respond(text)
+        short = limit_words(reply, MAX_REPLY_WORDS)
+        if short != reply:
+            set_turn(trimmed_words=len(reply.split()))
+        return short
+
+    def _respond(self, text: str) -> str:
         set_turn(input=text)
         focus, self._focus_note = self._focus_note, None
         pending, self._pending = self._pending, None
@@ -193,6 +201,10 @@ class Assistant:
             return f"Do you want me to remember{that_clause(text)}?"
 
         previous = self.memory.last_turn() if is_follow_up(text) else None
+        if previous and self._stands_alone(text):
+            # "What about my EMI amount?" after a share question is a new question; merging
+            # it would send it down the market route and read out share prices.
+            previous = None
         if previous:
             set_turn(follow_up=True)
         # "And my wife's?" is searched and routed as "<previous question> and my wife's?".
@@ -246,10 +258,11 @@ class Assistant:
             print("[CONTEXT] records sent to the model:\n  " + (knowledge.replace("\n", "\n  ") or "(none)"))
             if remembered:
                 print("[CONTEXT] memory sent to the model:\n  " + remembered.replace("\n", "\n  "))
-        answer = require_local_answer(
+        answer = full_sentences(as_second_person(require_local_answer(
             self.llm.chat(self.system_prompt, build_user_prompt(text, knowledge, remembered, earlier))
-        )
-        if EXAMPLE_FIGURE in answer and EXAMPLE_FIGURE not in f"{knowledge} {remembered} {earlier}":
+        )))
+        # Records store 50000 and the model says 50,000 (the bond's face value), so commas are ignored.
+        if EXAMPLE_FIGURE in answer and EXAMPLE_FIGURE.replace(",", "") not in f"{knowledge} {remembered} {earlier}".replace(",", ""):
             set_turn(guard="example_figure", model_answer=answer)
             return DIDNT_CATCH_ANSWER, False  # copied the prompt's example, not real data
         if FALSE_PROMISE.search(answer):
@@ -261,6 +274,13 @@ class Assistant:
         if is_uncertain(answer):
             set_turn(uncertain=True)
         return answer, not is_uncertain(answer)
+
+    def _stands_alone(self, text: str) -> bool:
+        """A follow-up with its own recorded topic and no holding named ("what about my EMI?",
+        not "and my wife's?" or "and Infosys?") is answered by itself, not joined to the
+        previous question."""
+        named = self.portfolio.named(text) if self.portfolio else []
+        return not named and self.knowledge.names_topic(text)
 
     def _is_market_question(self, text: str) -> bool:
         # With market lookups switched off, these questions are answered from the records.

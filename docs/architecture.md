@@ -223,7 +223,7 @@ audio are never traced. See [observability.md](observability.md).
 | Qwen3-0.6B at Q4_K_M (~400 MB) | Whole pipeline peaks at about 1.1 GB, leaving over 2 GB free on a 4 GB Pi |
 | Prebuilt baseline-ARMv8 llama.cpp wheel | No 20–40 minute compile on the Pi, and no `dotprod`/`i8mm`/SVE instructions that the Cortex-A72 lacks (verified by disassembly) |
 | `/no_think` + ChatML | Qwen3 otherwise writes a hidden reasoning trace first, costing seconds per reply |
-| `LLM_MAX_TOKENS=128` | Caps worst-case reply generation time |
+| `LLM_MAX_TOKENS=80`, `MAX_REPLY_WORDS=50` | Caps reply generation time and spoken length |
 | Whisper `tiny.en`, greedy decoding on Pi | Several times faster than `base` with beam 5; English-only models are more accurate for English |
 | 16 kHz native capture | Avoids resampling (and importing scipy) when the mic supports it |
 | Models loaded once at startup; the system prompt is processed during start-up (`LocalLLM.warm_up`) | Loading takes seconds; llama.cpp then reuses the processed prompt, so the first answer on a Pi 4 takes ~8 s instead of ~23 s |

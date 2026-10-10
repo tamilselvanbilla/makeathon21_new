@@ -1,5 +1,7 @@
 """Prompt text for the local model. Kept short: every token costs ~0.1 s on a Pi 4."""
 
+import os
+
 # The figure in the system prompt's example answer. If a reply contains it but the
 # context doesn't, the model copied the example (seen on the Pi for the noise
 # transcript "A": "Your monthly salary is INR 50,000").
@@ -8,6 +10,9 @@ DIDNT_CATCH_ANSWER = "Sorry, I didn't catch that. Could you say it again?"
 NOT_IN_RECORDS_ANSWER = "No matched data found."
 NO_NOTE_ANSWER = "I don't have a note about that, so I won't guess. Tell me \"remember that …\" and I'll keep it."
 NO_RECORDS = "None needed or none found."
+# Every answer is cut to this many words (see policy.limit_words). Not named in the
+# prompt: with "50 words" in it, Qwen3-0.6B copied the example's 50,000 as a salary.
+MAX_REPLY_WORDS = int(os.getenv("MAX_REPLY_WORDS", "50"))
 
 
 def build_system_prompt(
